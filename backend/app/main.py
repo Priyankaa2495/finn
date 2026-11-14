@@ -46,7 +46,7 @@ bootstrap()
 async def gate(request: Request, call_next):
     """Shared-secret gate: the network is personal data, so even the prototype isn't open.
     Visit /?key=<token> once; it's stored as an httpOnly cookie."""
-    if ACCESS_TOKEN and request.url.path.startswith("/api"):
+    if ACCESS_TOKEN and request.url.path.startswith("/api") and request.url.path != "/api/health":
         tok = request.headers.get("x-finn-key") or request.cookies.get("finn_key")
         if tok != ACCESS_TOKEN:
             return JSONResponse({"error": "locked"}, status_code=401)
@@ -60,6 +60,12 @@ async def gate(request: Request, call_next):
 
 def settings():
     return {**alerts.DEFAULTS, **db.kv_get("settings", {})}
+
+
+@app.get("/api/health")
+def health():
+    """Unauthenticated liveness probe for the host (reveals nothing)."""
+    return {"ok": True}
 
 
 @app.get("/api/meta")

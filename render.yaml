@@ -3,7 +3,7 @@ services:
     name: finn
     runtime: docker
     plan: free
-    healthCheckPath: /api/meta
+    healthCheckPath: /api/health
     autoDeploy: true            # each snapshot commit from the refresh job redeploys
     envVars:
       - key: GEMINI_API_KEY      # optional; FINN runs fully without it
