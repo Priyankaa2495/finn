@@ -1,0 +1,9 @@
+{
+  "name": "FINN",
+  "short_name": "FINN",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#EDF0F3",
+  "theme_color": "#EDF0F3",
+  "icons": []
+}
