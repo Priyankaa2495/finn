@@ -4,3 +4,4 @@ __pycache__/
 backend/data/finn.db
 .env
 .pytest_cache/
+IMPROVEMENT_LOG.md
