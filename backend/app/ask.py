@@ -19,7 +19,7 @@ from .network import graph
 from .network.resolve import org_index
 from .network.store import load as load_network
 
-PORTFOLIO = json.loads((DATA_DIR / "portfolio.json").read_text())
+PORTFOLIO = json.loads((DATA_DIR / "portfolio.json").read_text(encoding="utf-8"))
 
 
 def _find_org(q):

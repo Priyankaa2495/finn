@@ -25,7 +25,25 @@ FWD = re.compile(r"\b(guid\w*|expect\w*|target\w*|aim\w*|outlook|we (will|should
                  r"double[- ]digit|sustain\w*|maintain\w*)\b", re.I)
 METRIC = re.compile(r"\b(revenue|top ?line|sales|growth|margin|ebitda|capex|capital expenditure|volume|"
                     r"utili[sz]ation|order book|debt|bottom ?line|pat|profit)\b", re.I)
-PAST = re.compile(r"\b(grew|was|were|reported|delivered|achieved|declined|rose|fell|posted)\b", re.I)
+PAST = re.compile(r"\b(grew|was|were|reported|delivered|achieved|declined|rose|fell|posted|has been|have been|"
+                  r"we had|had finished|finished the|continues to deliver|last (quarter|year)|declin(?:ed|ing))\b", re.I)
+FWD_VERB = re.compile(r"\b(expect\w*|guid\w*|target\w*|will|should|aim\w*|going forward|confident)\b", re.I)
+# Analysts paraphrase guidance back to management; that is not management giving it.
+ASKING = re.compile(r"\byou(?: have| had|'ve)? (?:guided|said|mentioned|given|indicated)\b|\byour (?:guidance|target|ambition)\b|"
+                    r"\b(?:could|can|would) you\b|\bjust (?:want|wanted|to understand)\b|\bclarification\b|"
+                    r"\bif i recall\b|\bwhen you (?:are )?say|\bhow (?:are|do|should) (?:we|you)\b|\bmy question\b|"
+                    r"\bwanted to (?:ask|understand)\b|^sir\b|\byou (?:have )?(?:taken|made)\b|\bif i may\b|"
+                    r"\bwhen i look at\b|\bin your\b", re.I)
+SEQUENTIAL = re.compile(r"quarter[- ]on[- ]quarter|sequential(ly)?|\bq-?o-?q\b|quarter \d (?:against|over|vs\.?) quarter \d", re.I)
+ABSOLUTE = re.compile(r"(?:inr|rs\.?|₹)\s?[\d,]{3,}|[\d,]{3,}\s?(?:crores?|cr\b)", re.I)
+MULTIPLE = re.compile(r"\b\d(?:\.\d)?\s?x\b|\b(?:double|triple)\b(?!-digit|\sdigit)", re.I)
+SEGMENT = re.compile(r"\b(?:segments?|verticals?|divisions?|jv|joint venture|subsidiar(?:y|ies))\b|"
+                     r"\b(?!our\b)[a-z]+(?: phone)? business\b", re.I)
+_PCT = re.compile(r"\d+(?:\.\d+)?\s*(?:%|per ?cent|percentage)", re.I)
+_KINDS = [("pat_margin", r"(?:pat|net|profit) margin"),  # not operating margin; never graded against OPM
+          ("ebitda_margin", r"(?<!pat )(?<!net )(?<!profit )margin|ebitda"), ("capex", r"capex|capital expenditure"),
+          ("volume", r"volume"), ("utilisation", r"utili[sz]ation"),
+          ("revenue_growth", r"revenue|top ?line|sales|(?<!volume )grow")]
 MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 
 
@@ -46,9 +64,10 @@ def candidates(pages, limit=40):
     for pno, s in _sentences(pages):
         if not (FWD.search(s) and METRIC.search(s)):
             continue
-        if s.rstrip().endswith("?") or re.match(r"^(analyst|participant|moderator|question)\b", s, re.I):
-            continue  # analysts asking about a target is not management giving one
-        if PAST.search(s) and not re.search(r"\b(expect|guid|target|will|should|aim)\w*", s, re.I):
+        if s.rstrip().endswith("?") or re.match(r"^(analyst|participant|moderator|question)\b", s, re.I) \
+                or ASKING.search(s) or not re.search(r"[.!]\W*$", s):
+            continue  # analysts asking about a target is not management giving one; fragments cut at a page break
+        if PAST.search(s) and not FWD_VERB.search(s):
             continue  # 'revenue grew 9%' is a result, not a promise
         sc = len(FWD.findall(s)) + len(METRIC.findall(s)) + (2 if re.search(r"\d+\s*(%|per ?cent|bps)", s, re.I) else 0)
         scored.append((sc, pno, s))
@@ -57,14 +76,32 @@ def candidates(pages, limit=40):
 
 
 def metric_kind(text):
+    """The metric the target number belongs to: the keyword nearest the first percentage.
+    ('80-90% capacity utilisation ... with a double-digit margin' is a utilisation figure,
+    not a margin target; 'volume growth of 8-9%' is not revenue growth.)"""
     t = text.lower()
-    if re.search(r"margin|ebitda", t):
-        return "ebitda_margin"
-    if re.search(r"capex|capital expenditure|invest", t):
-        return "capex"
-    if re.search(r"revenue|top ?line|sales|grow", t):
-        return "revenue_growth"
-    return "other"
+    pct = _PCT.search(t)
+    if not pct:
+        for kind, pat in _KINDS:
+            if re.search(pat, t):
+                return kind
+        return "capex" if re.search(r"\binvest", t) else "other"
+    best, dist = "other", None
+    for kind, pat in _KINDS:
+        for m in re.finditer(pat, t):
+            d = min(abs(m.start() - pct.start()), abs(m.end() - pct.end()))
+            if dist is None or d < dist:
+                best, dist = kind, d
+    return best
+
+
+def _numbers(text):
+    return [float(x.replace(",", "")) for x in re.findall(r"\d[\d,]*(?:\.\d+)?", text or "")]
+
+
+def grounded(value, text):
+    """A model-supplied number counts only if the quoted text contains it."""
+    return value is None or any(abs(value - n) < 1e-6 for n in _numbers(text))
 
 
 def parse_target(text):
@@ -112,6 +149,16 @@ def _fy_of(period):  # 'Sep 2025' -> 26
 def check(item, q):
     """Deterministic promised-vs-delivered for the two metrics a calculator can judge."""
     kind, (lo, hi), fy = item["metric"], item["target"], item["fy"]
+    quote = item.get("quote", "")
+    if kind == "revenue_growth" and SEQUENTIAL.search(quote):
+        return {"status": "judgement", "detail": "Sequential (QoQ) target; not comparable with annual growth"}
+    # Found on live DIXON with the model on: these were graded mechanically and came out wrong.
+    if kind == "revenue_growth" and lo is not None and (lo > 100 or ABSOLUTE.search(quote)):
+        return {"status": "judgement", "detail": "An absolute revenue target (₹), not a growth rate"}
+    if MULTIPLE.search(quote):
+        return {"status": "judgement", "detail": "A multiple-of target (2x, 3x); not checked mechanically"}
+    if SEGMENT.search(quote):
+        return {"status": "judgement", "detail": "A segment-level target; the reported numbers are company-wide"}
     if not q or fy is None or lo is None or kind not in ("revenue_growth", "ebitda_margin"):
         return {"status": "judgement", "detail": "Not mechanically checkable"}
     periods = q["periods"]
@@ -149,7 +196,7 @@ def _heuristic_pick(cands, call):
     for c in cands:
         k = metric_kind(c["text"])
         lo, hi = parse_target(c["text"])
-        if k == "other" or (lo is None and k != "capex"):
+        if k in ("other", "utilisation") or (lo is None and k != "capex"):
             continue
         items.append({"metric": k, "statement": c["text"][:200], "quote": c["text"], "page": c["page"],
                       "target": [lo, hi], "fy": horizon(c["text"], call["date"]), "method": "heuristic"})
@@ -184,6 +231,8 @@ def extract_call(call):
                 if not c:  # model referenced a sentence that doesn't exist -> dropped
                     continue
                 lo, hi = it.get("target_low"), it.get("target_high")
+                if not (grounded(lo, c["text"]) and grounded(hi, c["text"])):
+                    lo = hi = None  # the model's number isn't in the quote: don't grade management on it
                 if lo is None:
                     lo, hi = parse_target(c["text"])
                 items.append({"metric": it.get("metric") or metric_kind(c["text"]),
@@ -268,5 +317,7 @@ def _rule_verdict(items):
     if not checked:
         return None
     good = sum(i["check"]["status"] in ("delivered", "on_track") for i in checked)
-    return (f"{good} of {len(checked)} checkable guidance points were delivered or are on track "
-            f"against reported numbers.")
+    v = f"{good} of {len(checked)} checkable guidance points were delivered or are on track against reported numbers."
+    if all(i.get("method") == "heuristic" for i in checked):
+        v = "Rough read (keyword extraction, no model): " + v[0].lower() + v[1:]
+    return v

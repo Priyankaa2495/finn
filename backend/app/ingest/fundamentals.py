@@ -13,6 +13,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .. import db
+from ..clock import utcnow
 from ..config import HTTP_UA
 
 log = logging.getLogger("finn.fundamentals")
@@ -75,7 +76,7 @@ def parse(html: str, symbol: str) -> dict:
         if entry.get("transcript") or entry.get("ppt"):
             docs["concalls"].append(entry)
     out["documents"] = docs
-    out["fetched_at"] = datetime.utcnow().isoformat()
+    out["fetched_at"] = utcnow().isoformat()
     return out
 
 
@@ -83,7 +84,7 @@ def fetch(symbol: str, max_age_hours=20, force=False) -> dict | None:
     symbol = symbol.upper().strip()
     if not force:
         cached = get(symbol)
-        if cached and datetime.fromisoformat(cached["fetched_at"]) > datetime.utcnow() - timedelta(hours=max_age_hours):
+        if cached and datetime.fromisoformat(cached["fetched_at"]) > utcnow() - timedelta(hours=max_age_hours):
             return cached
     headers = {"User-Agent": HTTP_UA}
     data = None
@@ -109,7 +110,7 @@ def fetch(symbol: str, max_age_hours=20, force=False) -> dict | None:
 def store(symbol, data):
     with db.conn() as c:
         c.execute("INSERT OR REPLACE INTO fundamentals VALUES (?,?,?)",
-                  (symbol, data.get("fetched_at", datetime.utcnow().isoformat()), json.dumps(data)))
+                  (symbol, data.get("fetched_at", utcnow().isoformat()), json.dumps(data)))
 
 
 def get(symbol):
@@ -125,8 +126,12 @@ def document_text(url: str, max_pages=40) -> list[str] | None:
         return None
     key = "doc:" + url
     cached = db.kv_get(key)
-    if cached:
-        return cached
+    if isinstance(cached, list):  # older cache shape: page list, total unknown
+        cached = {"pages": cached, "total": None}
+    if cached and (len(cached["pages"]) >= max_pages or cached["total"] == len(cached["pages"])):
+        return cached["pages"][:max_pages]
+    # Not cached, or cached shorter than this caller needs: a 6-page read must not starve
+    # a later 30-page read of the same filing.
     try:
         r = httpx.get(url, headers={"User-Agent": HTTP_UA, "Referer": "https://www.bseindia.com/"},
                       timeout=45, follow_redirects=True)
@@ -134,8 +139,9 @@ def document_text(url: str, max_pages=40) -> list[str] | None:
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(r.content))
         pages = [(p.extract_text() or "") for p in reader.pages[:max_pages]]
+        total = len(reader.pages)
     except Exception as e:
         log.warning("document fetch failed %s: %s", url, e)
-        return None
-    db.kv_set(key, pages)
+        return cached["pages"] if cached else None
+    db.kv_set(key, {"pages": pages, "total": total})
     return pages

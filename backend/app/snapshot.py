@@ -16,9 +16,9 @@ def export():
         filings = [dict(r) for r in c.execute("SELECT * FROM filings WHERE demo=0 ORDER BY ts")]
         fund = {r["symbol"]: json.loads(r["data"]) for r in c.execute("SELECT * FROM fundamentals")}
     fund = {k: v for k, v in fund.items() if not v.get("synthetic")}
-    (SNAPSHOT_DIR / "prices.json").write_text(json.dumps(prices))
-    (SNAPSHOT_DIR / "filings.json").write_text(json.dumps(filings, ensure_ascii=False))
-    (SNAPSHOT_DIR / "fundamentals.json").write_text(json.dumps(fund, ensure_ascii=False))
+    (SNAPSHOT_DIR / "prices.json").write_text(json.dumps(prices), encoding="utf-8")
+    (SNAPSHOT_DIR / "filings.json").write_text(json.dumps(filings, ensure_ascii=False), encoding="utf-8")
+    (SNAPSHOT_DIR / "fundamentals.json").write_text(json.dumps(fund, ensure_ascii=False), encoding="utf-8")
     return {"prices": len(prices), "filings": len(filings), "fundamentals": len(fund)}
 
 
@@ -26,9 +26,9 @@ def load():
     p = SNAPSHOT_DIR / "prices.json"
     if not p.exists():
         return False
-    prices = json.loads(p.read_text())
-    filings = json.loads((SNAPSHOT_DIR / "filings.json").read_text())
-    fund = json.loads((SNAPSHOT_DIR / "fundamentals.json").read_text())
+    prices = json.loads(p.read_text(encoding="utf-8"))
+    filings = json.loads((SNAPSHOT_DIR / "filings.json").read_text(encoding="utf-8"))
+    fund = json.loads((SNAPSHOT_DIR / "fundamentals.json").read_text(encoding="utf-8"))
     with db.conn() as c:
         c.executemany("INSERT OR REPLACE INTO prices VALUES (:symbol,:date,:close,:volume)", prices)
         for f in filings:

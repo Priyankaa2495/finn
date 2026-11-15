@@ -219,11 +219,11 @@ def demochem():
     }
     for k, lines in tx.items():
         pages = [" ".join(lines[:3]), " ".join(lines[3:])]
-        db.kv_set(f"doc:fixture://demochem/{k}", pages)
+        db.kv_set(f"doc:fixture://demochem/{k}", {"pages": pages, "total": len(pages)})
     ppt = ["Business mix FY26: Fluorinated intermediates 46% of revenue (+14% YoY); CRAMS 31% (+6% YoY); "
            "Bulk fluorochemicals 23% (-4% YoY). Segment contribution shown on page 2."]
     for c in calls:
-        db.kv_set(f"doc:{c['ppt']}", ppt)
+        db.kv_set(f"doc:{c['ppt']}", {"pages": ppt, "total": len(ppt)})
 
 
 def sample_results_fundamentals(symbol):

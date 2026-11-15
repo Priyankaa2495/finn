@@ -8,6 +8,7 @@
   Plus the Network: who in my network can help me understand this company.
 """
 import re
+import threading
 from datetime import date
 
 from rapidfuzz import fuzz
@@ -37,7 +38,7 @@ def _business_mix(d):
     out = llm.complete(
         "From these investor-presentation pages, extract the company's business segments and revenue "
         "share. JSON {\"period\": str, \"segments\": [{\"name\": str, \"share_pct\": number|null, "
-        "\"growth_pct\": number|null, \"page\": int}]}. Only numbers printed on the pages.\n\n" + "\n".join(rel),
+        "\"growth_pct\": number|null, \"page\": int}]}. Only numbers printed on the pages.\n\n" + llm.untrusted("\n".join(rel), 9000),
         tier="fast")
     if out:
         out["source"] = {"type": "Investor presentation", "date": ppt["date"], "url": ppt["ppt"]}
@@ -54,11 +55,33 @@ def _bull_bear(name, facts):
             "JSON {\"bull\": [{\"point\": str, \"facts\": [int]}], \"bear\": [...]}",
             tier="deep", system="You are a sceptical buy-side analyst. Never introduce a number not in the facts.")
         if out and out.get("bull"):
-            for side in ("bull", "bear"):  # drop points that cite no valid fact
-                out[side] = [p for p in out.get(side, []) if any(isinstance(i, int) and 0 <= i < len(facts) for i in p.get("facts", []))]
-            out["method"] = "llm:deep"
+            dropped = 0
+            for side in ("bull", "bear"):
+                kept = []
+                for p in out.get(side, []) or []:
+                    if isinstance(p, dict) and supported(p.get("point", ""), p.get("facts", []), facts):
+                        kept.append(p)
+                    else:
+                        dropped += 1
+                out[side] = kept
+            out["method"], out["dropped_unsupported"] = "llm:deep", dropped
             return out
     return None
+
+
+def supported(point, ids, facts):
+    """A bull/bear point survives only if it cites real facts AND every number it states
+    appears in those facts (to the precision written: '59%' is supported by '58.9%')."""
+    ids = [i for i in (ids or []) if isinstance(i, int) and 0 <= i < len(facts)]
+    if not ids:
+        return False
+    cited = [float(x.replace(",", "")) for i in ids for x in re.findall(r"\d[\d,]*(?:\.\d+)?", facts[i])]
+    for raw in re.findall(r"\d[\d,]*(?:\.\d+)?", point or ""):
+        v = float(raw.replace(",", ""))
+        tol = 0.5 * 10 ** -(len(raw.split(".")[1]) if "." in raw else 0)
+        if not any(abs(v - c) <= tol + 1e-9 for c in cited):
+            return False
+    return True
 
 
 def _org_for(symbol, d):
@@ -78,8 +101,26 @@ def _org_for(symbol, d):
     return None, sorted(themes)
 
 
+NSE_SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9&-]{0,19}")  # e.g. M&M, BAJAJ-AUTO, 3MINDIA
+
+
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
 def research(symbol: str):
-    symbol = symbol.upper().strip()
+    symbol = (symbol or "").upper().strip()
+    if not NSE_SYMBOL.fullmatch(symbol):  # validate before it becomes part of an outbound URL
+        return {"symbol": symbol[:24], "error": "That isn't an NSE symbol (letters, digits, & or -, up to 20)."}
+    # A first look scrapes screener, downloads 4 transcripts and may call the model (~20s).
+    # A double tap must not do that twice: the second request waits, then reads the cache.
+    with _LOCKS_GUARD:
+        lock = _LOCKS.setdefault(symbol, threading.Lock())
+    with lock:
+        return _research(symbol)
+
+
+def _research(symbol: str):
     cache_key = f"research:{symbol}:{date.today().isoformat()}"
     cached = db.kv_get(cache_key)
     if cached:
@@ -101,7 +142,11 @@ def research(symbol: str):
         for sign, text in (sec or {}).get("flags", []):
             facts.append(text)
     for it in g["items"][:8]:
-        facts.append(f"Guidance ({it['call']}): \"{it['quote'][:200]}\" — {it['check'].get('detail', '')}")
+        # Only outcomes that were actually checked are facts. "Not checkable" notes made the
+        # model write bear points like "capacity claims are not checkable" (live DIXON).
+        checked = it["check"]["status"] in ("delivered", "on_track", "close", "slightly_behind", "behind", "missed")
+        facts.append(f"Guidance ({it['call']}): \"{it['quote'][:200]}\""
+                     + (f" — {it['check'].get('detail', '')} ({it['check']['status']})" if checked else ""))
     for dr in g["drift"]:
         facts.append(f"{dr['metric']} guidance for {dr['fy']} was {dr['trend']} across calls")
     if snap.get("pe"):

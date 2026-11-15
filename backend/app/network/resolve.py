@@ -81,7 +81,7 @@ class OrgIndex:
 
 @lru_cache(maxsize=1)
 def org_index() -> OrgIndex:
-    data = json.loads((DATA_DIR / "orgs.json").read_text())
+    data = json.loads((DATA_DIR / "orgs.json").read_text(encoding="utf-8"))
     return OrgIndex(data["orgs"])
 
 

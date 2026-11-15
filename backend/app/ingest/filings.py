@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import httpx
 
 from .. import db
+from ..clock import utcnow
 from ..config import HTTP_UA
 
 log = logging.getLogger("finn.filings")
@@ -34,7 +35,7 @@ def _parse_ts(item):
             return datetime.strptime(item[k], fmt).isoformat()
         except Exception:
             pass
-    return datetime.utcnow().isoformat()
+    return utcnow().isoformat()
 
 
 def fetch(symbols, days=7):

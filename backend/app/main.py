@@ -2,12 +2,13 @@
 
 The web tier is read-mostly: it serves what the scheduled refresh job wrote, and only
 does live work for on-demand research (cached per symbol per day)."""
+import hmac
 import json
 import logging
 from datetime import datetime
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -20,7 +21,7 @@ from .research import engine
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="FINN", docs_url="/api/docs")
-PORTFOLIO = json.loads((DATA_DIR / "portfolio.json").read_text())
+PORTFOLIO = json.loads((DATA_DIR / "portfolio.json").read_text(encoding="utf-8"))
 HOLDINGS = PORTFOLIO["holdings"]
 
 
@@ -46,15 +47,28 @@ bootstrap()
 async def gate(request: Request, call_next):
     """Shared-secret gate: the network is personal data, so even the prototype isn't open.
     Visit /?key=<token> once; it's stored as an httpOnly cookie."""
-    if ACCESS_TOKEN and request.url.path.startswith("/api") and request.url.path != "/api/health":
-        tok = request.headers.get("x-finn-key") or request.cookies.get("finn_key")
-        if tok != ACCESS_TOKEN:
-            return JSONResponse({"error": "locked"}, status_code=401)
-    resp = await call_next(request)
+    path = request.url.path
+    if ACCESS_TOKEN and path.startswith("/api") and path != "/api/health":
+        tok = request.headers.get("x-finn-key") or request.cookies.get("finn_key") or ""
+        if not hmac.compare_digest(tok.encode(), ACCESS_TOKEN.encode()):  # constant-time
+            return _harden(JSONResponse({"error": "locked"}, status_code=401), api=True)
     k = request.query_params.get("key")
-    if ACCESS_TOKEN and k == ACCESS_TOKEN:
+    if ACCESS_TOKEN and k and hmac.compare_digest(k.encode(), ACCESS_TOKEN.encode()) and not path.startswith("/api"):
+        # Swap the key for a cookie and drop it from the URL, so it doesn't sit in the
+        # address bar, browser history, screenshots or a Referer header.
+        resp = RedirectResponse(path, status_code=303)
         resp.set_cookie("finn_key", k, httponly=True, samesite="lax", secure=request.url.scheme == "https",
                         max_age=60 * 60 * 24 * 30)
+        return _harden(resp)
+    return _harden(await call_next(request), api=path.startswith("/api"))
+
+
+def _harden(resp, api=False):
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    if api:  # responses carry personal network data: never store in shared caches
+        resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
@@ -148,8 +162,16 @@ def overview():
 
 @app.post("/api/network/import")
 async def import_csv(file: UploadFile = File(...)):
-    text = (await file.read()).decode("utf-8", errors="ignore")
+    raw = await file.read(MAX_IMPORT_BYTES + 1)
+    if len(raw) > MAX_IMPORT_BYTES:  # a 30k-connection export is ~3 MB; anything bigger isn't one
+        raise HTTPException(413, f"File too large (max {MAX_IMPORT_BYTES // 1_000_000} MB)")
+    text = raw.decode("utf-8-sig", errors="ignore")  # LinkedIn exports carry a BOM
+    if "First Name" not in text[:5000]:
+        raise HTTPException(400, "This doesn't look like LinkedIn's Connections.csv (no 'First Name' header).")
     return store.import_linkedin_csv(text)
+
+
+MAX_IMPORT_BYTES = 5_000_000
 
 
 class Ask(BaseModel):

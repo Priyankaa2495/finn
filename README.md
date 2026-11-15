@@ -8,6 +8,16 @@ FINN is a mobile-first prototype for a public-markets investor. It has three lay
 
 Deeper docs: [Architecture & writeup](docs/ARCHITECTURE.md), [Deploying](docs/DEPLOY.md), [Build & verification log](docs/BUILD_LOG.md).
 
+## Two minutes on a phone
+
+1. **Brief.** Open the *Dixon: CFO appointed* card (Demo). It shows the new CFO's career from the filing's own SEBI profile and your route to them through the network.
+2. Tap **7d**. These are live NSE filings: Kaynes' M&A term sheet comes with someone in your network who works there, and HDFC Bank's director changes and Bajaj Finance's fund-raises sit above the routine pile. Kaynes' results card says plainly when the quarter isn't in the standardised table yet, rather than showing last quarter's numbers.
+3. The **sliders icon** sets what counts as an unusual move for you (±% on the day, × average volume). The **speaker icon** reads the Brief aloud in ranked order with who to call, for the commute.
+4. **Ask** (type, or tap the mic on phones that support it) any NSE symbol, including one we never picked (`ASIANPAINT` and `TATAPOWER` both work). The first look takes about 20 s, then it's cached. Start with *Did management deliver?*: verbatim concall quotes with page numbers, checked against reported quarters.
+5. Ask `who should I call about Polycab` or `specialty chemicals`, then open **Network** for blind spots and natural reasons to reconnect.
+
+Live versus synthetic: filings, prices and fundamentals are live (refreshed 15 Nov 2026). The five *Demo* cards and every person in the network are synthetic; see [Data honesty](#data-honesty).
+
 ## Run it locally (2 minutes)
 
 ```bash
@@ -40,6 +50,8 @@ cd backend && python -m pytest -q
 
 The tests cover the judgement calls that would quietly mislead an investor if they broke: classification, materiality tiers, entity resolution, path ranking, the insider-compliance flag, guidance parsing and results arithmetic. They all run without an LLM.
 
+`tests/test_api.py` adds deploy-level guards: the access gate (locked without the key, unlocked by the share link's cookie), an open `/api/health` for the host's probe, and a check that every third-party import is declared in `requirements.txt`. CI (`.github/workflows/tests.yml`) runs the suite on a clean install, then builds the Docker image and probes it with the access gate on.
+
 ## Repository map
 
 ```
@@ -52,6 +64,8 @@ backend/app/
   ask.py       one input box -> intent
   main.py      FastAPI, serves the frontend too
 backend/data/  portfolio.json  orgs.json (org graph)  network.json (SYNTHETIC people)  snapshot/
+backend/eval/  filings_dev.jsonl (34 live filings, hand-checked labels)
+backend/scripts/ refresh.py (daily job; --reclassify)  eval_classify.py (coverage / precision report)
 frontend/      index.html  styles.css  app.js   (no framework, no build step)
 ```
 

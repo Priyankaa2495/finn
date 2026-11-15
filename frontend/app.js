@@ -3,6 +3,7 @@ const $app = document.getElementById("app");
 const $sheet = document.getElementById("sheet");
 const $scrim = document.getElementById("scrim");
 const S = { hours: 24, meta: null, brief: null, lastAsk: null, theme: null, overview: null };
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;  // voice Ask where supported
 
 // ---------- utils ---------------------------------------------------------------
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -90,12 +91,14 @@ function peopleList(people, { compact = false } = {}) {
 
 function resultsGrid(r) {
   if (!r) return `<p class="note">Numbers will appear once the quarterly table updates.</p>`;
+  if (r.pending) return `<p class="note">${esc(r.note)}</p>`;
   return `<div class="rgrid">
     <div class="h">${esc(r.quarter)}</div><div class="h num">Value</div><div class="h num">QoQ</div><div class="h num">YoY</div>
     ${r.metrics.map((m) => `<div>${esc(m.label)}</div><div class="num">${cr(m.value)}</div><div class="num">${pct(m.qoq)}</div><div class="num">${pct(m.yoy)}</div>`).join("")}
   </div>
   ${r.ebitda_margin != null ? `<p class="note">EBITDA margin ${r.ebitda_margin}%. ${esc(r.metrics.find((m) => m.note)?.note || "")}</p>` : ""}
   ${r.verdict ? `<p style="color:var(--ink);margin-top:8px">${esc(r.verdict)}</p>` : ""}
+  ${r.cross_check ? `<p class="note">${esc(r.cross_check)}</p>` : ""}
   <p class="note">${r.synthetic ? "Sample numbers (offline mode). " : ""}Source: ${esc(r.source)}, ${esc(r.basis)}.</p>`;
 }
 
@@ -140,14 +143,16 @@ async function renderBrief() {
   if (meta.data.prices_synthetic) notes.push("Prices are simulated.");
   $app.innerHTML = `
     <div class="top"><div class="brand">FINN<small>as of ${new Date(b.as_of).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}</small></div>
-      <button class="icon-btn" id="settings" aria-label="Alert settings"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button></div>
+      <div class="top-actions">${"speechSynthesis" in window ? `<button class="icon-btn" id="listen" aria-pressed="false" aria-label="Listen to the brief" title="Listen to the brief"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 10v4h4l5 4V6L8 10H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></svg></button>` : ""}
+      <button class="icon-btn" id="settings" aria-label="Alert settings"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button></div></div>
     <h1 class="lede">${lede}</h1>
-    <p class="sub">${b.counts.total} filings across your ${holdings} holdings in the last ${winLabel(b.window_hours)}. ${b.counts.know} worth knowing, ${b.counts.routine} routine ones folded away.</p>
+    <p class="sub">${b.counts.total} filings across your ${holdings} holdings in the last ${winLabel(b.window_hours)}. ${b.counts.know} worth knowing, ${b.counts.routine} routine ${b.counts.routine === 1 ? "one" : "ones"} folded away.</p>
     <div class="seg" role="group" aria-label="Time window">${WINDOWS.map(([h, l]) => `<button data-hours="${h}" aria-pressed="${h === S.hours}">${l}</button>`).join("")}</div>
     ${notes.length ? `<div class="banner">${esc(notes.join(" "))}</div>` : ""}
 
     ${b.alerts.length ? `<h2>Unusual moves <span class="n">by your thresholds</span></h2>
-      <div class="moves">${b.alerts.map((a) => `<div class="move"><div><b>${esc(a.symbol)}</b> ${pct(a.move_pct)}</div>${spark(a.spark)}<div class="why">${esc(a.reasons.join("; "))}</div></div>`).join("")}</div>` : ""}
+      <div class="moves">${b.alerts.map((a) => `<div class="move"><div><b>${esc(a.symbol)}</b> ${pct(a.move_pct)} <span class="n">${esc(new Date(a.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" }))}</span></div>${spark(a.spark)}<div class="why">${esc(a.reasons.join("; "))}</div></div>`).join("")}</div>`
+      : `<p class="note">No unusual moves in this window by your triggers (±${esc(meta.settings.price_move_pct)}% on the day, ${esc(meta.settings.volume_multiple)}× volume). Tune them with the sliders icon.</p>`}
 
     ${b.act.length ? `<h2>Needs you <span class="n">${b.act.length}</span></h2>${b.act.map(actCard).join("")}` : ""}
 
@@ -163,6 +168,37 @@ async function renderBrief() {
   $app.querySelectorAll("[data-hours]").forEach((el) => (el.onclick = () => { S.hours = +el.dataset.hours; renderBrief(); }));
   $app.querySelectorAll("[data-why]").forEach((el) => (el.onclick = () => { const w = document.getElementById(`why-${el.dataset.why}`); w.hidden = !w.hidden; }));
   document.getElementById("settings").onclick = openSettings;
+  const listen = document.getElementById("listen");
+  if (listen) listen.onclick = () => toggleSpeech(listen, briefScript(b, lede));
+}
+
+// ---------- voice ----------------------------------------------------------------
+// The brief read aloud, for the commute: the same ranking, said in order of what matters.
+// Built from the cards (no model), so it never says anything the screen doesn't.
+function briefScript(b, lede) {
+  const say = [lede];
+  b.act.slice(0, 5).forEach((c, i) => {
+    let line = `${i === 0 ? "First" : i === b.act.length - 1 || i === 4 ? "Finally" : "Next"}, ${c.company || c.symbol}: ${c.title.replace(/…$/, "")}.`;
+    if (c.demo) line += " This one is a demo scenario.";
+    if (c.call?.length) line += ` ${c.call[0].name} is best placed to explain it.`;
+    else if (c.person?.paths?.length) line += " You have a route to them through your network.";
+    say.push(line);
+  });
+  if (b.act.length > 5) say.push(`${b.act.length - 5} more need you, on screen.`);
+  if (b.alerts.length) say.push("Unusual moves: " + b.alerts.slice(0, 3).map((a) => `${a.symbol} ${a.move_pct >= 0 ? "up" : "down"} ${Math.abs(a.move_pct).toFixed(1)} percent`).join("; ") + ".");
+  if (b.know.length) say.push(`${b.know.length} more worth knowing, on screen.`);
+  if (b.routine.total) say.push(`${b.routine.total} routine ${b.routine.total === 1 ? "filing" : "filings"} folded away.`);
+  return say.join(" ");
+}
+
+function toggleSpeech(btn, text) {
+  const synth = window.speechSynthesis;
+  if (synth.speaking) { synth.cancel(); btn.setAttribute("aria-pressed", "false"); return; }
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "en-IN"; u.rate = 1.05;
+  u.onend = u.onerror = () => btn.setAttribute("aria-pressed", "false");
+  btn.setAttribute("aria-pressed", "true");
+  synth.speak(u);
 }
 
 // ---------- settings ------------------------------------------------------------
@@ -245,7 +281,8 @@ function driftChart(d, items) {
     const lab = h.target[1] != null && h.target[1] !== h.target[0] ? `${h.target[0]}–${h.target[1]}%` : `${h.target[0]}%`;
     return `<line x1="${x}" x2="${x}" y1="${b}" y2="${a + 0.01}" stroke="var(--pen)" stroke-width="7" stroke-linecap="round"/><text x="${x + 8}" y="${(a + b) / 2 + 4}" style="fill:var(--pen);font-weight:600">${lab}</text><text x="${x}" y="${H - 6}" text-anchor="middle">${esc(h.call)}</text>`; }).join("");
   const act = actual != null ? `<line x1="${P - 14}" x2="${W - 4}" y1="${y(actual)}" y2="${y(actual)}" stroke="var(--down)" stroke-dasharray="4 3" stroke-width="1.5"/><text x="${P - 14}" y="${y(actual) + 14}" style="fill:var(--down)">actual so far ${actual}%</text>` : "";
-  const name = d.metric === "ebitda_margin" ? "EBITDA margin" : d.metric === "revenue_growth" ? "Revenue growth" : d.metric;
+  const name = { ebitda_margin: "EBITDA margin", revenue_growth: "Revenue growth", pat_margin: "PAT margin", volume: "Volume growth",
+    capex: "Capex", utilisation: "Utilisation" }[d.metric] || d.metric;
   return `<p style="margin:14px 0 0;font-weight:650">${esc(name)} guidance for ${esc(d.fy)}: ${esc(d.trend)} across calls</p>
     <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(name)} guidance ${esc(d.trend)} over successive calls">${act}${marks}</svg>`;
 }
@@ -305,14 +342,35 @@ function renderDiligence(d) {
 }
 
 async function renderAsk(q) {
-  $app.innerHTML = `<div class="askbar"><form id="askf"><input id="q" name="q" autocomplete="off" placeholder="A company, a person or a theme" value="${esc(q || "")}" aria-label="Ask FINN"><button class="btn" type="submit">Ask</button></form></div>
+  $app.innerHTML = `<div class="askbar"><form id="askf"><input id="q" name="q" autocomplete="off" placeholder="A company, a person or a theme" value="${esc(q || "")}" aria-label="Ask FINN">${SpeechRec ? `<button class="icon-btn" type="button" id="mic" aria-pressed="false" aria-label="Ask by voice" title="Ask by voice"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>` : ""}<button class="btn" type="submit">Ask</button></form></div>
     <div id="out">${q ? `<div class="loading">Reading primary sources…</div>` : `
       <h1 class="lede" style="font-size:28px">Ask about any NSE company, anyone you might meet, or a theme.</h1>
       <p class="sub">Research uses only filings and the company's own concall transcripts. People answers come from your network.</p>
       <div class="sugg">${SUGGEST.map((s) => `<button data-q="${esc(s)}">${esc(s)}</button>`).join("")}</div>`}</div>`;
   document.getElementById("askf").onsubmit = (e) => { e.preventDefault(); const v = e.target.q.value.trim(); if (v) location.hash = `#ask/${encodeURIComponent(v)}`; };
+  const mic = document.getElementById("mic");
+  if (mic) mic.onclick = () => {
+    // Speak a question ("who should I call about Polycab"); it goes through the same Ask routing.
+    const rec = new SpeechRec();
+    rec.lang = "en-IN"; rec.interimResults = false; rec.maxAlternatives = 1;
+    const input = document.getElementById("q");
+    rec.onresult = (ev) => { input.value = ev.results[0][0].transcript; document.getElementById("askf").requestSubmit(); };
+    rec.onerror = (ev) => toast(ev.error === "not-allowed" ? "Microphone access is off for this site." : "Didn't catch that. Try again or type it.");
+    rec.onend = () => mic.setAttribute("aria-pressed", "false");
+    mic.setAttribute("aria-pressed", "true");
+    try { rec.start(); } catch (err) { mic.setAttribute("aria-pressed", "false"); }
+  };
   if (!q) return;
   const out = document.getElementById("out");
+  // A first look at a company reads its statements and four transcripts (~20s); say what's happening.
+  const steps = ["Reading primary sources…", "Fetching standardised financials…", "Reading the last four concall transcripts…",
+    "Checking guidance against reported quarters…", "Finding who in your network knows it… (first look takes ~20s, then it's cached)"];
+  let step = 0;
+  const ticker = setInterval(() => {
+    const el = out.querySelector(".loading");
+    if (!el || !out.isConnected) return clearInterval(ticker);
+    el.textContent = steps[Math.min(++step, steps.length - 1)];
+  }, 3500);
   try {
     const r = await api("/api/ask", { method: "POST", body: JSON.stringify({ q }) });
     if (r.intent === "research") out.innerHTML = renderResearch(r.data);
@@ -366,7 +424,10 @@ async function renderNetwork() {
   if (S.theme) showTheme(S.theme);
   document.getElementById("csv").onchange = async (e) => {
     const fd = new FormData(); fd.append("file", e.target.files[0]);
-    const r = await fetch("/api/network/import", { method: "POST", body: fd }).then((x) => x.json());
+    const res = await fetch("/api/network/import", { method: "POST", body: fd });
+    const r = await res.json().catch(() => ({}));
+    e.target.value = "";
+    if (!res.ok) return toast(r.detail || `Import failed (${res.status})`);
     toast(`Added ${r.added} people`); S.overview = null; renderNetwork();
   };
 }
@@ -374,6 +435,7 @@ async function renderNetwork() {
 // ---------- router ----------------------------------------------------------------
 async function route() {
   closeSheet();
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();  // leaving the Brief stops the read-out
   const [tab, arg] = (location.hash.slice(1) || "brief").split("/");
   document.querySelectorAll("nav.tabs a").forEach((a) => (a.dataset.tab === tab ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
   window.scrollTo(0, 0);

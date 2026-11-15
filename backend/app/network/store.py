@@ -17,11 +17,11 @@ NETWORK_PATH = DATA_DIR / "network.json"
 
 @lru_cache(maxsize=1)
 def load():
-    return json.loads(NETWORK_PATH.read_text())
+    return json.loads(NETWORK_PATH.read_text(encoding="utf-8"))
 
 
 def save(data):
-    NETWORK_PATH.write_text(json.dumps(data, indent=1, ensure_ascii=False))
+    NETWORK_PATH.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
     load.cache_clear()
 
 
@@ -29,8 +29,8 @@ def import_linkedin_csv(text: str) -> dict:
     """Import LinkedIn's own 'Connections.csv' data export (Settings > Data privacy >
     Get a copy of your data). This is the consent-friendly route: the investor exports
     their own data; we never scrape. Email addresses are dropped (data minimisation)."""
-    lines = text.splitlines()
-    start = next((i for i, l in enumerate(lines) if l.startswith("First Name")), 0)
+    lines = text.lstrip("﻿").splitlines()
+    start = next((i for i, l in enumerate(lines) if l.lstrip('﻿"').startswith("First Name")), 0)
     rows = csv.DictReader(io.StringIO("\n".join(lines[start:])))
     data = load()
     existing = {p["name"].lower() for p in data["people"]}

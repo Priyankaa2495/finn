@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 from .. import db, llm
 from ..config import LLM_ENABLED
+from ..ingest import fundamentals
 from ..network import graph
 from ..network.resolve import org_index
 from . import alerts, classify, materiality, results
@@ -46,7 +47,7 @@ def _summary(f, tier):
     s = base if len(base) <= 170 else base[:167].rsplit(" ", 1)[0] + "…"
     if tier != "routine" and LLM_ENABLED and len(base) > 170:
         out = llm.complete(f"Summarise this exchange filing in one plain sentence (max 22 words), "
-                           f"facts only, keep any numbers:\n\n{f['text'][:2500]}", tier="fast", want_json=False)
+                           f"facts only, keep any numbers:\n\n{llm.untrusted(f['text'], 2500)}", tier="fast", want_json=False)
         if out:
             s = out.strip().strip('"')
     with db.conn() as c:
@@ -62,12 +63,19 @@ def _profile_from_filing(f, extra):
         return extra["profile"]
     if not LLM_ENABLED:
         return None
+    text = f["text"] or ""
+    if f.get("url"):
+        # NSE's own text is a summary line; the SEBI brief profile is in the attached
+        # letter, usually an annexure in the first few pages.
+        pages = fundamentals.document_text(f["url"], max_pages=6)
+        if pages:
+            text = text + "\n" + "\n".join(pages)
     out = llm.complete(
         "From this Indian exchange filing about a management change, extract the person "
-        "joining (or leaving) and their career as JSON: {\"name\": str, \"joining\": bool, "
+        "joining, re-appointed or leaving, and their career as JSON: {\"name\": str, \"joining\": bool, "
         "\"experience\": [{\"org\", \"role\", \"from\": year|null, \"to\": year|null}], "
         "\"education\": [{\"school\", \"degree\", \"from\": year|null, \"to\": year|null}]}. "
-        "Only use facts in the text.\n\n" + f["text"][:4000], tier="fast")
+        "Only use facts in the text.\n\n" + llm.untrusted(text, 8000), tier="fast")
     if out and out.get("name"):
         extra["profile"] = out
         with db.conn() as c:
@@ -129,7 +137,7 @@ def build(holdings, hours=24, settings=None):
                     d = graph.diligence(prof)
                     card["person"] = {"profile": prof, **d}
             elif f["category"] == "results":
-                card["results"] = results.headline(f["symbol"])
+                card["results"] = results.for_filing(f["symbol"], f["text"], f.get("url") or "")
             if f["category"] in CONTEXT_CATS and oid:
                 card["call"] = graph.who_to_call(oid, limit=2)
                 if f["category"] == "litigation":  # legal angle, from the expertise map
@@ -153,6 +161,6 @@ def build(holdings, hours=24, settings=None):
         "know": [c for c in cards if c["tier"] == "know"],
         "routine": {"total": len(routine), "groups": [{"label": k, "items": v} for k, v in
                                                        sorted(by_cat.items(), key=lambda kv: -len(kv[1]))]},
-        "alerts": alerts.check(holdings, settings),
+        "alerts": alerts.check(holdings, settings, since_date=since[:10]),
         "warmups": graph.warmups(events),
     }
