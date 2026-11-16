@@ -1,453 +1,468 @@
-// FINN — mobile-first client. No framework, no build step: three views, one sheet.
-const $app = document.getElementById("app");
-const $sheet = document.getElementById("sheet");
-const $scrim = document.getElementById("scrim");
-const S = { hours: 24, meta: null, brief: null, lastAsk: null, theme: null, overview: null };
-const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;  // voice Ask where supported
+/* FINN frontend — vanilla JS, no build step.
+   Every string from the API is third-party or derived data: it is inserted via esc() or
+   textContent only. No innerHTML with raw API text anywhere. */
+"use strict";
 
-// ---------- utils ---------------------------------------------------------------
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+
+// ------------------------------------------------------------------ storage
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("finn." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("finn." + k, JSON.stringify(v)); } catch { /* private mode */ } },
+};
+
+// Access: the server turns `/?key=…` into an httpOnly cookie and redirects to a clean URL.
+// JS never sees or stores the key; same-origin fetches carry the cookie automatically.
+try { localStorage.removeItem("finn.token"); } catch { /* older builds stored it; clear it */ }
+
+const state = {
+  tab: "brief",
+  window: store.get("window", 24),
+  price: store.get("price", 5),
+  volume: store.get("volume", 2),
+  brief: null,
+  askCtrl: null,
+};
+
+// ------------------------------------------------------------------ helpers
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function safeUrl(u) {
+  if (!u || typeof u !== "string") return null;     // new URL(null) would resolve to "/null"
+  try { const x = new URL(u, location.href); return ["https:", "http:"].includes(x.protocol) ? x.href : null; } catch { return null; }
+}
+const inr = v => (v == null ? "—" : "₹" + Number(v).toLocaleString("en-IN", { maximumFractionDigits: v < 100 ? 1 : 0 }) + " Cr");
+const pct = (v, signed = true) => v == null ? "—" : (signed && v > 0 ? "+" : "") + v.toFixed(1) + "%";
+const cls = v => v == null ? "" : v >= 0 ? "up" : "down";
+const timeFmt = new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" });
+const when = iso => { try { return timeFmt.format(new Date(iso)); } catch { return ""; } };
+
 async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (r.status === 401) throw new Error("locked");
-  if (!r.ok) throw new Error(`Request failed (${r.status})`);
-  return r.json();
-}
-const cr = (v) => (v == null ? "—" : `₹${Math.round(v).toLocaleString("en-IN")} cr`);
-const num = (v, d = 1) => (v == null ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: d }));
-const pct = (v) => (v == null ? `<span class="note">—</span>` : `<span class="${v >= 0 ? "up" : "down"}">${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)}%</span>`);
-const initials = (n) => n.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
-function ago(ts) {
-  const h = (Date.now() - new Date(ts).getTime()) / 36e5;
-  if (h < 1) return `${Math.max(1, Math.round(h * 60))}m ago`;
-  if (h < 24) return `${Math.round(h)}h ago`;
-  return `${Math.round(h / 24)}d ago`;
-}
-function toast(msg) {
-  const t = document.createElement("div"); t.className = "toast"; t.textContent = msg;
-  document.body.appendChild(t); setTimeout(() => t.remove(), 2200);
-}
-function spark(vals, w = 144, h = 30) {
-  const v = vals.filter((x) => x != null); if (v.length < 2) return "";
-  const lo = Math.min(...v), hi = Math.max(...v), sx = w / (v.length - 1), sy = (hi - lo) || 1;
-  const pts = v.map((x, i) => `${(i * sx).toFixed(1)},${(h - 2 - ((x - lo) / sy) * (h - 4)).toFixed(1)}`).join(" ");
-  const up = v[v.length - 1] >= v[v.length - 2];
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="var(--${up ? "up" : "down"})" stroke-width="1.6"/></svg>`;
+  const res = await fetch(path, { ...opts, credentials: "same-origin" });
+  let body = null;
+  try { body = await res.json(); } catch { /* non-JSON */ }
+  if (res.status === 401) {
+    const err = new Error("This FINN is private. Open the access link you were sent (it ends in ?key=…).");
+    err.status = 401;
+    throw err;
+  }
+  if (!res.ok) {
+    const detail = body && (typeof body.detail === "string" ? body.detail : "Request was rejected");
+    const err = new Error(detail || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return body;
 }
 
-// ---------- sheet ---------------------------------------------------------------
-function openSheet(html) {
-  $sheet.innerHTML = `<div class="grab"></div>${html}`;
-  $sheet.classList.add("on"); $scrim.classList.add("on");
-  $sheet.querySelector("button, a, input")?.focus({ preventScroll: true });
-}
-function closeSheet() { $sheet.classList.remove("on"); $scrim.classList.remove("on"); }
-$scrim.onclick = closeSheet;
-document.addEventListener("keydown", (e) => e.key === "Escape" && closeSheet());
-
-// ---------- shared pieces -------------------------------------------------------
-const PALETTE = ["var(--pen)", "#8C98AB", "var(--up)", "var(--warn)", "#B7C1CF"];
-function careerStrip(exp) {
-  const now = new Date().getFullYear();
-  const segs = exp.filter((e) => e.from).map((e) => ({ ...e, yrs: Math.max(1, (e.to || now) - e.from) }));
-  if (!segs.length) return "";
-  const tot = segs.reduce((a, s) => a + s.yrs, 0);
-  return `<div class="career" aria-label="Career">
-    <div class="bar">${segs.map((s, i) => `<span style="width:${(s.yrs / tot) * 100}%;background:${PALETTE[i % 5]}"></span>`).join("")}</div>
-    <div class="legend">${segs.map((s, i) => `<span><i style="background:${PALETTE[i % 5]}"></i>${esc(s.role)}, ${esc(s.org)} ${s.from}–${s.to || "now"}</span>`).join("")}</div></div>`;
+// ------------------------------------------------------------------ tabs
+function showTab(name) {
+  stopSpeaking();                       // speech must never outlive the screen it describes
+  stopListening();
+  state.tab = name;
+  for (const b of $$(".tabbar [role=tab]")) {
+    const on = b.dataset.tab === name;
+    b.setAttribute("aria-selected", String(on));
+    $("#tab-" + b.dataset.tab).hidden = !on;
+  }
+  $("#listen").hidden = name !== "brief";
+  if (name === "network" && !$("#net-body").dataset.loaded) loadNetwork();
+  if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
+  window.scrollTo({ top: 0 });
 }
 
-function wayIn(name, p) {
-  if (p.direct) return `<div class="wayin"><div class="label">Already in your network</div>
-    <div class="reason">${esc(p.direct.name)}, ${esc(p.direct.how_met)}</div></div>`;
-  const best = p.paths?.[0];
-  if (!best) return `<div class="wayin"><div class="label">Your way in</div><div class="reason">No one in your network overlaps with ${esc(name)} yet.</div></div>`;
-  const tgt = `<div class="node target"><div class="dot">${esc(initials(name))}</div><span>${esc(name.split(" ")[0])}</span></div>`;
-  const me = `<div class="node me"><div class="dot">You</div><span>&nbsp;</span></div>`;
-  const path = best.via
-    ? `${me}<div class="edge"></div><div class="node"><div class="dot">${esc(initials(best.via.name))}</div><span>${esc(best.via.name.split(" ")[0])}</span></div><div class="edge"></div>${tgt}`
-    : `${me}<div class="edge" style="grid-column: span 3"></div>${tgt}`;
-  const alt = p.paths.slice(1, 3).map((x) => x.via ? `${esc(x.via.name)} (${esc(x.link.label)})` : esc(x.why)).join("; ");
-  return `<div class="wayin draw"><div class="label">Your way in</div>
-    <div class="path" role="img" aria-label="${esc(best.why)}">${path}</div>
-    <div class="reason">${esc(best.why)}.</div>
-    ${alt ? `<div class="alt">Also: ${alt}</div>` : ""}
-    ${best.via ? `<div class="row-actions"><button class="btn small" data-draft="${esc(best.via.id)}" data-reason="${esc(`Want your read on ${name}, who ${best.link.label}`)}">Message ${esc(best.via.name.split(" ")[0])}</button></div>` : ""}
+// ------------------------------------------------------------------ Brief
+function numsTable(rows) {
+  const order = [["revenue", "Revenue"], ["ebitda", "EBITDA"], ["pbt", "PBT"], ["pat", "PAT"]];
+  const body = order.filter(([k]) => rows && rows[k]).map(([k, label]) => {
+    const r = rows[k];
+    return `<tr><td>${label}</td><td>${inr(r.value)}</td><td class="${cls(r.qoq)}">${pct(r.qoq)}</td><td class="${cls(r.yoy)}">${pct(r.yoy)}</td></tr>`;
+  }).join("");
+  if (!body) return "";
+  return `<div class="scroll-x"><table class="nums"><thead><tr><th></th><th>Value</th><th>QoQ</th><th>YoY</th></tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function resultsBlock(rc) {
+  if (!rc) return "";
+  const primary = rc.source && rc.source.startsWith("Primary");
+  const where = rc.page ? ` · p.${esc(rc.page)}` : "";
+  const all = (rc.flags || []).filter(f => !f.startsWith("PDF not usable"));
+  const checks = all.filter(f => f.includes("vs screener"));
+  const notes = all.filter(f => !f.includes("vs screener")).map(f => `<li>${esc(f)}</li>`).join("");
+  const empty = !rc.rows || !Object.keys(rc.rows).length;
+  return `<div class="results">
+    ${empty ? `<p class="summary">${esc(rc.source)}</p>` : numsTable(rc.rows)}
+    <span class="prov ${primary ? "" : "fallback"}">${esc(rc.quarter)} · ${esc(rc.source)}${where}${rc.basis ? " · " + esc(rc.basis) : ""}</span>
+    ${rc.unit_note && rc.unit_note.includes("converted") ? `<p class="fine">${esc(rc.unit_note)}</p>` : ""}
+    ${notes ? `<ul class="flags">${notes}</ul>` : ""}
+    ${checks.length ? `<details><summary>${checks.length} prior-period figure${checks.length > 1 ? "s" : ""} differ from screener</summary><ul class="flags">${checks.map(f => `<li>${esc(f)}</li>`).join("")}</ul></details>` : ""}
   </div>`;
 }
 
-function peopleList(people, { compact = false } = {}) {
-  if (!people?.length) return `<p class="note">No one in your network is close to this yet.</p>`;
-  return `<div class="people">${people.map((p) => `
-    <button class="person" data-person="${esc(p.id)}">
-      <span class="avatar">${esc(initials(p.name))}</span>
-      <span><span class="nm">${esc(p.name)}</span>
-        <span class="w">${esc(p.why || p.headline)}</span>
-        ${p.evidence && !compact ? `<span class="w" style="display:block">${esc(p.evidence.join("; "))}</span>` : ""}
-        <span class="warmth">Last spoke ${esc(p.last_spoke || "—")}</span>
-        ${p.caution ? `<span class="caution">${esc(p.caution)}</span>` : ""}
-      </span></button>`).join("")}</div>`;
+function pathChips(names) {
+  return `<div class="path">${names.map((n, i) => (i ? "<i>→</i>" : "") + `<span>${esc(n)}</span>`).join("")}</div>`;
 }
 
-function resultsGrid(r) {
-  if (!r) return `<p class="note">Numbers will appear once the quarterly table updates.</p>`;
-  if (r.pending) return `<p class="note">${esc(r.note)}</p>`;
-  return `<div class="rgrid">
-    <div class="h">${esc(r.quarter)}</div><div class="h num">Value</div><div class="h num">QoQ</div><div class="h num">YoY</div>
-    ${r.metrics.map((m) => `<div>${esc(m.label)}</div><div class="num">${cr(m.value)}</div><div class="num">${pct(m.qoq)}</div><div class="num">${pct(m.yoy)}</div>`).join("")}
-  </div>
-  ${r.ebitda_margin != null ? `<p class="note">EBITDA margin ${r.ebitda_margin}%. ${esc(r.metrics.find((m) => m.note)?.note || "")}</p>` : ""}
-  ${r.verdict ? `<p style="color:var(--ink);margin-top:8px">${esc(r.verdict)}</p>` : ""}
-  ${r.cross_check ? `<p class="note">${esc(r.cross_check)}</p>` : ""}
-  <p class="note">${r.synthetic ? "Sample numbers (offline mode). " : ""}Source: ${esc(r.source)}, ${esc(r.basis)}.</p>`;
+function strengthBar(s) {
+  const w = Math.max(4, Math.min(100, Math.round((s || 0) * 100)));
+  return `<div class="bar" role="img" aria-label="Link strength ${w} of 100"><span data-w="${w}"></span></div>`;
 }
+// CSP forbids inline style attributes; widths are applied through the CSSOM after render.
+function applyBars(root) { for (const s of $$(".bar > span[data-w]", root)) s.style.width = s.dataset.w + "%"; }
 
-// ---------- BRIEF (push) --------------------------------------------------------
-const WINDOWS = [[6, "6h"], [24, "24h"], [72, "3d"], [168, "7d"]];
-const winLabel = (h) => (h < 24 ? `${h} hours` : h === 24 ? "24 hours" : `${h / 24} days`);
-
-function actCard(c) {
-  let body = "";
-  if (c.person) {
-    const prof = c.person.profile;
-    body += careerStrip(prof.experience || []);
-    body += wayIn(prof.name, c.person);
-    if (c.person.questions?.length)
-      body += `<div class="whybox" style="color:var(--ink-2);margin-top:12px"><b>Worth asking</b></div><ul class="qs">${c.person.questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ul>`;
+function networkBlock(n) {
+  if (!n) return "";
+  if (n.kind === "knows_person") {
+    const via = n.path.length > 2 ? n.path[1] : null;
+    return `<div class="net"><div><b>${via ? esc(via) + " can introduce you" : "You know " + esc(n.person)}</b>${n.confidence === "possible" ? " <span class='tag'>possible match</span>" : ""}</div>
+      ${pathChips(n.path)}${strengthBar(n.strength)}
+      <div class="fine">${esc(n.hops.slice(1).join(" · "))}</div>
+      ${n.insider && n.insider.is_insider ? `<div class="caution">⚠ ${esc(n.insider.caution)}</div>` : ""}</div>`;
   }
-  if (c.category === "results") body += resultsGrid(c.results);
-  if (c.call?.length) body += `<div class="whybox" style="margin-top:14px;color:var(--pen);font-weight:700">Who can give you context</div>${peopleList(c.call, { compact: true })}`;
-  return `<article class="card">
-    <div class="meta"><span class="tick">${esc(c.symbol)}</span><span class="chip">${esc(c.category_label)}</span><span>${ago(c.ts)}</span>${c.demo ? `<span class="chip demo" title="Synthetic showcase scenario">Demo</span>` : ""}</div>
-    <h3>${esc(c.title)}</h3>
-    ${c.summary && !c.person && c.category !== "results" && !c.summary.toLowerCase().includes(c.title.replace(/…$/, "").toLowerCase().slice(-40)) ? `<p>${esc(c.summary)}</p>` : ""}
-    ${body}
-    <div class="foot">
-      <button class="linkish" data-why="${esc(c.id)}">Why this is here</button>
-      ${c.url ? `<a class="linkish" href="${esc(c.url)}" target="_blank" rel="noopener">Open filing</a>` : ""}
-    </div>
-    <div class="whybox" id="why-${esc(c.id)}" hidden>Priority ${c.score}/100: ${esc(c.category_label.toLowerCase())}${c.why.length ? ", " + esc(c.why.join(", ")) : ""}. Classified by ${esc(c.cls_method)}.</div>
+  return `<div class="net"><div>Call <b>${esc(n.person)}</b></div>
+    <div class="fine">${esc((n.why || []).join(" · "))}</div>
+    ${n.insider && n.insider.is_insider ? `<div class="caution">⚠ ${esc(n.insider.caution)}</div>` : ""}</div>`;
+}
+
+function card(i) {
+  const tier = i.tier === "ACT" ? "act" : i.tier === "KNOW" ? "know" : "";
+  const url = safeUrl(i.url);
+  const bio = i.bio && (i.bio.name || i.bio.profile) ? `<div class="bio"><b>${esc(i.bio.name || "Incoming")}</b>${i.bio.role ? ", " + esc(i.bio.role) : ""}${i.bio.profile ? `<details><summary>Profile from filing${i.bio.page ? " · p." + esc(i.bio.page) : ""}</summary><p>${esc(i.bio.profile)}</p></details>` : ""}</div>` : "";
+  return `<article class="card ${tier}">
+    <div class="meta"><span class="sym">${esc(i.symbol)}</span><span class="tag ${tier}">${esc(i.label)}</span>${i.demo ? '<span class="tag demo">DEMO</span>' : ""}<time datetime="${esc(i.filed_at)}">${esc(when(i.filed_at))}</time></div>
+    <h3>${esc(i.subject)}</h3>
+    ${i.summary ? `<p class="summary">${esc(i.summary)}</p>` : ""}
+    ${resultsBlock(i.results_card)}${bio}${networkBlock(i.network)}
+    <footer>
+      <details><summary>Why it's here · ${esc(i.score)}</summary><ul class="reasons">${i.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul></details>
+      ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Filing PDF ↗</a>` : ""}
+    </footer>
   </article>`;
 }
 
-async function renderBrief() {
-  $app.innerHTML = `<div class="loading">Reading the filings…</div>`;
-  const [meta, b] = await Promise.all([S.meta || api("/api/meta"), api(`/api/brief?hours=${S.hours}`)]);
-  S.meta = meta; S.brief = b;
-  const n = b.counts.act;
-  const lede = n === 0 ? "Nothing needs you right now." : n === 1 ? "One thing needs you." : `${["", "", "Two", "Three", "Four", "Five", "Six", "Seven"][n] || n} things need you.`;
-  const holdings = meta.portfolio.holdings.length;
-  const notes = [];
-  if (meta.data.live_filings === 0) notes.push("Offline mode: the feed below is synthetic and labelled Demo.");
-  else if (meta.data.demo_mode) notes.push("Items marked Demo are synthetic scenarios mixed into the live feed.");
-  if (meta.data.prices_synthetic) notes.push("Prices are simulated.");
-  $app.innerHTML = `
-    <div class="top"><div class="brand">FINN<small>as of ${new Date(b.as_of).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}</small></div>
-      <div class="top-actions">${"speechSynthesis" in window ? `<button class="icon-btn" id="listen" aria-pressed="false" aria-label="Listen to the brief" title="Listen to the brief"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 10v4h4l5 4V6L8 10H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></svg></button>` : ""}
-      <button class="icon-btn" id="settings" aria-label="Alert settings"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button></div></div>
-    <h1 class="lede">${lede}</h1>
-    <p class="sub">${b.counts.total} filings across your ${holdings} holdings in the last ${winLabel(b.window_hours)}. ${b.counts.know} worth knowing, ${b.counts.routine} routine ${b.counts.routine === 1 ? "one" : "ones"} folded away.</p>
-    <div class="seg" role="group" aria-label="Time window">${WINDOWS.map(([h, l]) => `<button data-hours="${h}" aria-pressed="${h === S.hours}">${l}</button>`).join("")}</div>
-    ${notes.length ? `<div class="banner">${esc(notes.join(" "))}</div>` : ""}
-
-    ${b.alerts.length ? `<h2>Unusual moves <span class="n">by your thresholds</span></h2>
-      <div class="moves">${b.alerts.map((a) => `<div class="move"><div><b>${esc(a.symbol)}</b> ${pct(a.move_pct)} <span class="n">${esc(new Date(a.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" }))}</span></div>${spark(a.spark)}<div class="why">${esc(a.reasons.join("; "))}</div></div>`).join("")}</div>`
-      : `<p class="note">No unusual moves in this window by your triggers (±${esc(meta.settings.price_move_pct)}% on the day, ${esc(meta.settings.volume_multiple)}× volume). Tune them with the sliders icon.</p>`}
-
-    ${b.act.length ? `<h2>Needs you <span class="n">${b.act.length}</span></h2>${b.act.map(actCard).join("")}` : ""}
-
-    ${b.know.length ? `<h2>Worth knowing <span class="n">${b.know.length}</span></h2><div class="rows">${b.know.map((c) => `
-      <div class="rowi"><div class="meta"><span class="tick">${esc(c.symbol)}</span><span class="chip">${esc(c.category_label)}</span><span>${ago(c.ts)}</span>${c.demo ? `<span class="chip demo">Demo</span>` : ""}</div>
-      <div class="t">${esc(c.title)}</div>${c.call?.length ? `<div class="s">Ask ${esc(c.call[0].name)}: ${esc(c.call[0].why)}</div>` : ""}</div>`).join("")}</div>` : ""}
-
-    ${b.routine.total ? `<details class="fold"><summary>${b.routine.total} routine filings</summary>
-      ${b.routine.groups.map((g) => g.items.map((c) => `<div class="rt"><b>${esc(c.symbol)}</b> ${esc(g.label)}: ${esc(c.title)}</div>`).join("")).join("")}</details>` : ""}
-
-    ${b.warmups.length ? `<h2>Reasons to reconnect <span class="n">from today's news</span></h2>${peopleList(b.warmups.slice(0, 3).map((w) => ({ ...w, why: w.reason })))}` : ""}
-  `;
-  $app.querySelectorAll("[data-hours]").forEach((el) => (el.onclick = () => { S.hours = +el.dataset.hours; renderBrief(); }));
-  $app.querySelectorAll("[data-why]").forEach((el) => (el.onclick = () => { const w = document.getElementById(`why-${el.dataset.why}`); w.hidden = !w.hidden; }));
-  document.getElementById("settings").onclick = openSettings;
-  const listen = document.getElementById("listen");
-  if (listen) listen.onclick = () => toggleSpeech(listen, briefScript(b, lede));
+function renderBrief(b) {
+  const el = $("#brief-body");
+  $("#asof").textContent = b.as_of ? "Filings as of " + when(b.as_of) : "No data yet";
+  const alerts = b.alerts.length ? `<div class="alerts">${b.alerts.map(a => `<div class="alert"><span class="k">${esc(a.symbol)}</span><span>${esc(a.message.replace(a.symbol + " ", ""))}</span></div>`).join("")}</div>` : "";
+  const section = (title, list) => list.length ? `<h2>${title} · ${list.length}</h2>${list.map(card).join("")}` : "";
+  const warm = b.warmups.length ? `<h2>Natural reasons to reconnect</h2><div class="panel">${b.warmups.map(w => `<div class="person"><div class="who"><b>${esc(w.name)}</b><span class="sym">${esc(w.symbol)}</span></div><div class="why">${esc(w.message)}</div></div>`).join("")}</div>` : "";
+  const routine = b.routine.length ? `<details class="panel routine"><summary>${b.routine_count} routine filings folded</summary><ul>${b.routine.map(r => `<li><span class="sym">${esc(r.symbol)}</span><span>${esc(r.subject)}</span></li>`).join("")}</ul></details>` : "";
+  const nothing = !b.act.length && !b.know.length && !b.alerts.length
+    ? `<div class="empty">Nothing material in this window. ${b.routine_count ? "Only routine paperwork." : ""}</div>` : "";
+  el.innerHTML = alerts + section("Act on", b.act) + section("Worth knowing", b.know) + nothing + warm + routine;
+  applyBars(el);
 }
 
-// ---------- voice ----------------------------------------------------------------
-// The brief read aloud, for the commute: the same ranking, said in order of what matters.
-// Built from the cards (no model), so it never says anything the screen doesn't.
-function briefScript(b, lede) {
-  const say = [lede];
-  b.act.slice(0, 5).forEach((c, i) => {
-    let line = `${i === 0 ? "First" : i === b.act.length - 1 || i === 4 ? "Finally" : "Next"}, ${c.company || c.symbol}: ${c.title.replace(/…$/, "")}.`;
-    if (c.demo) line += " This one is a demo scenario.";
-    if (c.call?.length) line += ` ${c.call[0].name} is best placed to explain it.`;
-    else if (c.person?.paths?.length) line += " You have a route to them through your network.";
-    say.push(line);
-  });
-  if (b.act.length > 5) say.push(`${b.act.length - 5} more need you, on screen.`);
-  if (b.alerts.length) say.push("Unusual moves: " + b.alerts.slice(0, 3).map((a) => `${a.symbol} ${a.move_pct >= 0 ? "up" : "down"} ${Math.abs(a.move_pct).toFixed(1)} percent`).join("; ") + ".");
-  if (b.know.length) say.push(`${b.know.length} more worth knowing, on screen.`);
-  if (b.routine.total) say.push(`${b.routine.total} routine ${b.routine.total === 1 ? "filing" : "filings"} folded away.`);
-  return say.join(" ");
-}
-
-function toggleSpeech(btn, text) {
-  const synth = window.speechSynthesis;
-  if (synth.speaking) { synth.cancel(); btn.setAttribute("aria-pressed", "false"); return; }
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "en-IN"; u.rate = 1.05;
-  u.onend = u.onerror = () => btn.setAttribute("aria-pressed", "false");
-  btn.setAttribute("aria-pressed", "true");
-  synth.speak(u);
-}
-
-// ---------- settings ------------------------------------------------------------
-const CATS = ["results", "M&A", "management_change", "litigation", "fund_raise", "capex", "pledging", "credit_rating", "insider_trading", "press_release", "dividend"];
-const CAT_LABEL = { results: "Results", "M&A": "M&A", management_change: "Management", litigation: "Litigation", fund_raise: "Fund raise", capex: "Capex", pledging: "Pledging", credit_rating: "Credit rating", insider_trading: "Insider trades", press_release: "Press releases", dividend: "Dividends" };
-function openSettings() {
-  const s = { ...S.meta.settings };
-  const draw = () => openSheet(`<h3>What counts as unusual</h3><p class="note">FINN watches your holdings after every close and only interrupts you past these lines.</p>
-    <label for="pm">Price move: ±${s.price_move_pct}% in a day</label><input id="pm" type="range" min="1" max="10" step="0.5" value="${s.price_move_pct}">
-    <label for="vm">Volume: ${s.volume_multiple}× the ${s.lookback}-day average</label><input id="vm" type="range" min="1.2" max="5" step="0.1" value="${s.volume_multiple}">
-    <label>Announcement types you follow (ranked higher)</label><div class="togs">${CATS.map((c) => `<button data-care="${c}" aria-pressed="${s.care_about.includes(c)}">${CAT_LABEL[c]}</button>`).join("")}</div>
-    <label>Muted (always folded away)</label><div class="togs">${CATS.map((c) => `<button data-mute="${c}" aria-pressed="${s.muted.includes(c)}">${CAT_LABEL[c]}</button>`).join("")}</div>
-    <div class="row-actions"><button class="btn" id="save">Save settings</button><button class="btn ghost" id="cancel">Cancel</button></div>`);
-  draw();
-  const bind = () => {
-    $sheet.querySelector("#pm").oninput = (e) => { s.price_move_pct = +e.target.value; $sheet.querySelector("label[for=pm]").textContent = `Price move: ±${s.price_move_pct}% in a day`; };
-    $sheet.querySelector("#vm").oninput = (e) => { s.volume_multiple = +e.target.value; $sheet.querySelector("label[for=vm]").textContent = `Volume: ${s.volume_multiple}× the ${s.lookback}-day average`; };
-    $sheet.querySelectorAll("[data-care]").forEach((b) => (b.onclick = () => { const c = b.dataset.care; s.care_about = s.care_about.includes(c) ? s.care_about.filter((x) => x !== c) : [...s.care_about, c]; b.setAttribute("aria-pressed", s.care_about.includes(c)); }));
-    $sheet.querySelectorAll("[data-mute]").forEach((b) => (b.onclick = () => { const c = b.dataset.mute; s.muted = s.muted.includes(c) ? s.muted.filter((x) => x !== c) : [...s.muted, c]; b.setAttribute("aria-pressed", s.muted.includes(c)); }));
-    $sheet.querySelector("#cancel").onclick = closeSheet;
-    $sheet.querySelector("#save").onclick = async () => {
-      S.meta.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify(s) });
-      closeSheet(); toast("Settings saved"); renderBrief();
-    };
-  };
-  bind();
-}
-
-// ---------- person / draft sheets -------------------------------------------------
-async function openPerson(id) {
-  const p = await api(`/api/network/person/${encodeURIComponent(id)}`);
-  openSheet(`<h3>${esc(p.name)}</h3><p class="note">${esc(p.headline)}${p.city ? `, ${esc(p.city)}` : ""}</p>
-    <p style="margin:10px 0 0">${esc(p.how_met)}. Last spoke ${esc(p.last_spoke)}.</p>
-    ${careerStrip(p.experience)}
-    <ul class="tl">${[...p.experience].reverse().map((e) => `<li><b>${esc(e.role)}</b>, ${esc(e.org)} <span class="note">${e.from || "?"}–${e.to || "now"}</span></li>`).join("")}
-    ${p.education.map((e) => `<li>${esc(e.degree)}, ${esc(e.school)} <span class="note">${e.to || ""}</span></li>`).join("")}</ul>
-    ${p.tags?.length ? `<p class="note">Go-to for: ${esc(p.tags.join(", "))}</p>` : ""}
-    <div class="row-actions"><button class="btn" data-draft="${esc(p.id)}" data-reason="${esc("catching up")}">Draft a note</button></div>`);
-}
-
-async function openDraft(id, reason) {
-  openSheet(`<div class="loading">Drafting…</div>`);
-  const d = await api("/api/draft", { method: "POST", body: JSON.stringify({ person_id: id, reason }) });
-  openSheet(`<h3>Draft</h3><p class="note">Only their first name and the reason left your network to write this.</p>
-    <textarea class="draft" id="dtext">${esc(d.text)}</textarea>
-    <div class="row-actions"><a class="btn" id="wa" target="_blank" rel="noopener">Open in WhatsApp</a><button class="btn ghost" id="copy">Copy text</button></div>`);
-  const t = $sheet.querySelector("#dtext"), wa = $sheet.querySelector("#wa");
-  const sync = () => (wa.href = `https://wa.me/?text=${encodeURIComponent(t.value)}`); sync(); t.oninput = sync;
-  $sheet.querySelector("#copy").onclick = async () => { await navigator.clipboard.writeText(t.value); toast("Copied"); };
-}
-
-document.addEventListener("click", (e) => {
-  const d = e.target.closest("[data-draft]"); if (d) { e.preventDefault(); openDraft(d.dataset.draft, d.dataset.reason); return; }
-  const p = e.target.closest("[data-person]"); if (p) { openPerson(p.dataset.person); return; }
-  const q = e.target.closest("[data-q]"); if (q) { location.hash = `#ask/${encodeURIComponent(q.dataset.q)}`; }
-});
-
-// ---------- ASK (pull) ----------------------------------------------------------
-const SUGGEST = ["DEMOCHEM", "NAVINFLUOR", "CGPOWER", "Who should I call about Dixon?", "Who knows Arvind Kulkarni?", "Experts in rural lending", "Blind spots"];
-
-function trajectoryChart(t) {
-  if (!t?.revenue?.length) return "";
-  const W = 340, H = 140, P = 22, n = t.revenue.length, bw = (W - P) / n;
-  const maxR = Math.max(...t.revenue.filter(Boolean));
-  const opm = t.opm || [], oLo = Math.min(...opm.filter((x) => x != null), 0), oHi = Math.max(...opm.filter((x) => x != null), 1);
-  const bars = t.revenue.map((v, i) => { const h = ((v || 0) / maxR) * (H - 40); return `<rect x="${P + i * bw + 3}" y="${H - 20 - h}" width="${bw - 6}" height="${h}" rx="2" fill="var(--pen-soft)" stroke="var(--pen)" stroke-width=".6"/>`; }).join("");
-  const line = opm.map((v, i) => v == null ? null : `${P + i * bw + bw / 2},${H - 26 - ((v - oLo) / ((oHi - oLo) || 1)) * (H - 60)}`).filter(Boolean).join(" ");
-  const labels = t.periods.map((p, i) => i % 2 === n % 2 ? "" : `<text x="${P + i * bw + bw / 2}" y="${H - 6}" text-anchor="middle">${esc(p.slice(-4))}</text>`).join("");
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Revenue bars and operating margin line by fiscal year">${bars}
-    <polyline points="${line}" fill="none" stroke="var(--ink)" stroke-width="1.6"/>${labels}
-    <text x="${P}" y="10">Revenue (bars), operating margin (line)</text></svg>`;
-}
-
-function driftChart(d, items) {
-  const actual = items.find((i) => i.metric === d.metric && `FY${i.fy}` === d.fy && i.check.actual != null)?.check.actual;
-  const W = 340, H = 120, P = 30, hist = d.history, vals = hist.flatMap((h) => [h.target[0], h.target[1]]).filter((x) => x != null).concat(actual ?? []);
-  const lo = Math.min(...vals) - 2, hi = Math.max(...vals) + 2, sx = (W - P - 70) / Math.max(1, hist.length - 1);
-  const y = (v) => 14 + (1 - (v - lo) / (hi - lo)) * (H - 40);
-  const marks = hist.map((h, i) => { const x = P + i * sx, a = y(h.target[0]), b = y(h.target[1] ?? h.target[0]);
-    const lab = h.target[1] != null && h.target[1] !== h.target[0] ? `${h.target[0]}–${h.target[1]}%` : `${h.target[0]}%`;
-    return `<line x1="${x}" x2="${x}" y1="${b}" y2="${a + 0.01}" stroke="var(--pen)" stroke-width="7" stroke-linecap="round"/><text x="${x + 8}" y="${(a + b) / 2 + 4}" style="fill:var(--pen);font-weight:600">${lab}</text><text x="${x}" y="${H - 6}" text-anchor="middle">${esc(h.call)}</text>`; }).join("");
-  const act = actual != null ? `<line x1="${P - 14}" x2="${W - 4}" y1="${y(actual)}" y2="${y(actual)}" stroke="var(--down)" stroke-dasharray="4 3" stroke-width="1.5"/><text x="${P - 14}" y="${y(actual) + 14}" style="fill:var(--down)">actual so far ${actual}%</text>` : "";
-  const name = { ebitda_margin: "EBITDA margin", revenue_growth: "Revenue growth", pat_margin: "PAT margin", volume: "Volume growth",
-    capex: "Capex", utilisation: "Utilisation" }[d.metric] || d.metric;
-  return `<p style="margin:14px 0 0;font-weight:650">${esc(name)} guidance for ${esc(d.fy)}: ${esc(d.trend)} across calls</p>
-    <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(name)} guidance ${esc(d.trend)} over successive calls">${act}${marks}</svg>`;
-}
-
-const STATUS = { delivered: "Delivered", on_track: "On track", close: "Close", slightly_behind: "Slightly behind", behind: "Behind", missed: "Missed", too_early: "Too early", judgement: "Needs judgement", unclear: "Unclear" };
-function renderResearch(r) {
-  if (r.error) return `<p class="empty">${esc(r.error)} Live research needs the server to reach screener.in; in offline mode try DEMOCHEM.</p>`;
-  const s = r.snapshot, g = r.guidance;
-  const flags = (sec) => (sec?.flags?.length ? `<ul class="flags">${sec.flags.map(([k, t]) => `<li class="${k === "+" ? "pos" : k === "-" ? "neg" : "neu"}">${esc(t)}</li>`).join("")}</ul>` : "");
-  return `
-    <div class="rh"><div class="meta"><span class="tick">${esc(r.symbol)}</span>${r.industry?.length ? `<span>${esc(r.industry.slice(-1)[0])}</span>` : ""}<span>${esc(r.basis || "")}</span></div>
-      <h1>${esc(r.name)}</h1></div>
-    ${r.synthetic ? `<div class="banner">Fictional company with synthetic filings, for offline demo. Point FINN at any NSE symbol when online.</div>` : ""}
-
-    <h2>Did management deliver?</h2>
-    ${g.items.length ? `<p class="verdict">${esc(g.verdict || "")}</p>
-      ${g.drift.map((d) => driftChart(d, g.items)).join("")}
-      <div style="margin-top:10px">${g.items.slice(0, 8).map((it) => `<div class="promise">
-        <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><q>${esc(it.quote)}</q><span class="status st-${esc(it.check.status)}">${STATUS[it.check.status] || esc(it.check.status)}</span></div>
-        <div class="m">${esc(it.call)} call, page ${it.page}. ${esc(it.check.detail || "")}</div></div>`).join("")}</div>`
-      : `<p class="note">${g.calls_found ? "No explicit numeric guidance found in the last calls." : "No concall transcripts available for this company."}</p>`}
-
-    <h2>Snapshot</h2>
-    <div class="tiles">
-      <div class="tile"><div class="k">Market cap</div><div class="v">${s.market_cap_cr ? cr(s.market_cap_cr) : "—"}</div></div>
-      <div class="tile"><div class="k">P/E</div><div class="v">${num(s.pe)}</div></div>
-      <div class="tile"><div class="k">${s.lender ? "ROE" : "ROCE"}</div><div class="v">${num(s.lender ? s.roe : s.roce)}%</div></div>
-      <div class="tile"><div class="k">Revenue, TTM</div><div class="v">${cr(s.revenue_ttm)}</div></div>
-      <div class="tile"><div class="k">PAT, TTM</div><div class="v">${cr(s.pat_ttm)}</div></div>
-      <div class="tile"><div class="k">${s.lender ? "Fin. margin" : "Op. margin"} ${esc((s.last_fy || "").replace(/^\w+ \d\d(\d\d)$/, "FY$1"))}</div><div class="v">${num(s.opm_last_fy)}%</div></div>
-    </div>
-    ${r.about ? `<p style="color:var(--ink-2)">${esc(r.about.slice(0, 420))}${r.about.length > 420 ? "…" : ""}</p>` : ""}
-    ${r.mix?.segments?.length ? `<div style="margin-top:6px">${r.mix.segments.map((m) => `<div class="cov" style="grid-template-columns:150px 1fr;margin:6px 0"><span>${esc(m.name)} <span class="note">${m.share_pct ?? "?"}%</span></span><div class="bar"><span style="width:${m.share_pct || 0}%"></span></div></div>`).join("")}<p class="note">${esc(r.mix.period || "")} from the investor presentation.</p></div>` : ""}
-
-    <h2>Trajectory</h2>
-    ${r.trajectory ? `<p class="note">Revenue CAGR ${num(r.trajectory.revenue_cagr_3y)}% over 3 years, ${num(r.trajectory.revenue_cagr_5y)}% over 5. PAT CAGR ${num(r.trajectory.pat_cagr_3y)}% over 3.</p>${trajectoryChart(r.trajectory)}${flags(r.trajectory)}` : `<p class="note">No annual history.</p>`}
-
-    <h2>Balance sheet and cash</h2>
-    ${flags(r.balance_sheet)}${flags(r.cash)}
-    ${r.cash && !r.cash.lender ? `<p class="note">Operating cash as % of profit, by year: ${r.cash.conversion_pct.map((c, i) => `${esc(r.cash.periods[i].slice(-4))} ${c ?? "—"}%`).join(", ")}.</p>` : ""}
-
-    <h2>Bull and bear</h2>
-    <div class="bb"><div><h4 class="up">Bull</h4><ul>${(r.bull_bear.bull || []).map((p) => `<li>${esc(p.point)}</li>`).join("") || "<li>Nothing in the numbers argues for it yet.</li>"}</ul></div>
-      <div><h4 class="down">Bear</h4><ul>${(r.bull_bear.bear || []).map((p) => `<li>${esc(p.point)}</li>`).join("") || "<li>Nothing in the numbers argues against it yet.</li>"}</ul></div></div>
-    <p class="note">${r.bull_bear.method === "rules" ? "Built from the computed flags above." : "Written by the model from the facts above only."}</p>
-
-    <h2>Who can help you understand it</h2>${peopleList(r.people)}
-
-    <h2>Sources</h2>${r.sources.map((x) => `<div class="src">${esc(x.type)}${x.date ? `, ${esc(x.date)}` : ""} ${x.url && !x.url.startsWith("fixture") ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">open</a>` : `<span class="note">(fixture)</span>`}</div>`).join("")}
-    <p class="note" style="margin-top:12px">Primary sources only: company filings and its own concall transcripts. No news, no broker notes.</p>`;
-}
-
-function renderDiligence(d) {
-  return `<div class="rh"><h1>${esc(d.name)}</h1><p class="note">Career and your routes in</p></div>
-    ${careerStrip(d.timeline)}${wayIn(d.name, d)}
-    ${d.questions?.length ? `<h2>Worth asking</h2><ul class="qs">${d.questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ul>` : ""}`;
-}
-
-async function renderAsk(q) {
-  $app.innerHTML = `<div class="askbar"><form id="askf"><input id="q" name="q" autocomplete="off" placeholder="A company, a person or a theme" value="${esc(q || "")}" aria-label="Ask FINN">${SpeechRec ? `<button class="icon-btn" type="button" id="mic" aria-pressed="false" aria-label="Ask by voice" title="Ask by voice"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>` : ""}<button class="btn" type="submit">Ask</button></form></div>
-    <div id="out">${q ? `<div class="loading">Reading primary sources…</div>` : `
-      <h1 class="lede" style="font-size:28px">Ask about any NSE company, anyone you might meet, or a theme.</h1>
-      <p class="sub">Research uses only filings and the company's own concall transcripts. People answers come from your network.</p>
-      <div class="sugg">${SUGGEST.map((s) => `<button data-q="${esc(s)}">${esc(s)}</button>`).join("")}</div>`}</div>`;
-  document.getElementById("askf").onsubmit = (e) => { e.preventDefault(); const v = e.target.q.value.trim(); if (v) location.hash = `#ask/${encodeURIComponent(v)}`; };
-  const mic = document.getElementById("mic");
-  if (mic) mic.onclick = () => {
-    // Speak a question ("who should I call about Polycab"); it goes through the same Ask routing.
-    const rec = new SpeechRec();
-    rec.lang = "en-IN"; rec.interimResults = false; rec.maxAlternatives = 1;
-    const input = document.getElementById("q");
-    rec.onresult = (ev) => { input.value = ev.results[0][0].transcript; document.getElementById("askf").requestSubmit(); };
-    rec.onerror = (ev) => toast(ev.error === "not-allowed" ? "Microphone access is off for this site." : "Didn't catch that. Try again or type it.");
-    rec.onend = () => mic.setAttribute("aria-pressed", "false");
-    mic.setAttribute("aria-pressed", "true");
-    try { rec.start(); } catch (err) { mic.setAttribute("aria-pressed", "false"); }
-  };
-  if (!q) return;
-  const out = document.getElementById("out");
-  // A first look at a company reads its statements and four transcripts (~20s); say what's happening.
-  const steps = ["Reading primary sources…", "Fetching standardised financials…", "Reading the last four concall transcripts…",
-    "Checking guidance against reported quarters…", "Finding who in your network knows it… (first look takes ~20s, then it's cached)"];
-  let step = 0;
-  const ticker = setInterval(() => {
-    const el = out.querySelector(".loading");
-    if (!el || !out.isConnected) return clearInterval(ticker);
-    el.textContent = steps[Math.min(++step, steps.length - 1)];
-  }, 3500);
+async function loadBrief() {
+  const el = $("#brief-body");
+  el.innerHTML = `<div class="loading"><span class="pulse-dots"><i></i><i></i><i></i></span><div class="status">Ranking today's filings…</div></div>`;
   try {
-    const r = await api("/api/ask", { method: "POST", body: JSON.stringify({ q }) });
-    if (r.intent === "research") out.innerHTML = renderResearch(r.data);
-    else if (r.intent === "who_to_call") out.innerHTML = `<div class="rh"><h1>${esc(r.data.org.name)}</h1><p class="note">People who have worked there, at a competitor, supplier or customer, ranked by how much they'd know and how easy they are to call.</p></div>${peopleList(r.data.people)}
-      <div class="row-actions"><button class="btn ghost" data-q="${esc(r.data.org.ticker || r.data.org.name)}">Research ${esc(r.data.org.name)}</button></div>`;
-    else if (r.intent === "expertise") out.innerHTML = `<div class="rh"><h1>Go-to people for ${esc(r.data.theme)}</h1></div>${peopleList(r.data.people)}`;
-    else if (r.intent === "coverage") out.innerHTML = `<div class="rh"><h1>Blind spots</h1><p class="note">Holdings where nobody in your network is close.</p></div>${coverage(r.data)}`;
-    else if (r.intent === "person") { out.innerHTML = ""; openPerson(r.id); }
-    else if (r.intent === "diligence") out.innerHTML = renderDiligence(r.data);
-    else out.innerHTML = `<p class="empty">FINN couldn't tell what you meant. Try an NSE symbol like INFY, a name, or "experts in specialty chemicals".</p>`;
-  } catch (e) { out.innerHTML = `<p class="empty">${esc(e.message)}</p>`; }
-}
-
-// ---------- NETWORK -------------------------------------------------------------
-function coverage(rows, limit = 99) {
-  return `<div class="cov">${rows.slice(0, limit).map((r) => `
-    <span><b>${esc(r.symbol)}</b><br><span class="note">${r.weight}% of book</span></span>
-    <div><div class="bar ${r.score < 0.3 ? "weak" : ""}"><span style="width:${Math.min(100, (r.score / 0.8) * 100)}%"></span></div>
-    <div class="who" style="margin-top:4px">${r.best ? `${esc(r.best.name)}: ${esc(r.best.why)}` : "No one yet"}</div></div>`).join("")}</div>`;
-}
-
-async function renderNetwork() {
-  $app.innerHTML = `<div class="loading">Looking across your network…</div>`;
-  const o = S.overview || (S.overview = await api("/api/network/overview"));
-  const weak = o.coverage.filter((c) => c.score < 0.3);
-  const themes = ["specialty chemicals", "rural lending", "semiconductors", "quick commerce", "banking", "electronics manufacturing", "pharma", "consumer"];
-  $app.innerHTML = `
-    <div class="top"><div class="brand">FINN<small>your network</small></div></div>
-    <h1 class="lede">${weak.length ? `${weak.length} holdings have nobody close to them.` : "Every holding has someone close."}</h1>
-    <p class="sub">${o.size} people you know, ${o.second_degree} more you can reach through them. Matching runs on this server and never leaves it.</p>
-
-    <h2>Blind spots <span class="n">weakest coverage first</span></h2>${coverage(o.coverage, 6)}
-    <details class="fold"><summary>All ${o.coverage.length} holdings</summary>${coverage(o.coverage.slice(6))}</details>
-
-    ${o.warmups.length ? `<h2>Reasons to reconnect <span class="n">their world just made news</span></h2>${peopleList(o.warmups.map((w) => ({ ...w, why: w.reason })))}` : ""}
-
-    <h2>Go-to people by theme</h2>
-    <div class="themes">${themes.map((t) => `<button data-theme="${esc(t)}" aria-pressed="${S.theme === t}">${esc(t)}</button>`).join("")}</div>
-    <div id="experts"></div>
-
-    <h2>Grow it</h2>
-    <p class="note">Import your own LinkedIn export (Settings, Data privacy, Get a copy of your data, Connections). Email addresses are dropped on import.</p>
-    <div class="row-actions"><label class="btn ghost" for="csv">Import Connections.csv</label><input id="csv" type="file" accept=".csv" hidden></div>`;
-  const showTheme = async (t) => {
-    S.theme = t;
-    $app.querySelectorAll("[data-theme]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.theme === t));
-    const r = await api(`/api/network/expertise?theme=${encodeURIComponent(t)}`);
-    document.getElementById("experts").innerHTML = peopleList(r.people);
-  };
-  $app.querySelectorAll("[data-theme]").forEach((b) => (b.onclick = () => showTheme(b.dataset.theme)));
-  if (S.theme) showTheme(S.theme);
-  document.getElementById("csv").onchange = async (e) => {
-    const fd = new FormData(); fd.append("file", e.target.files[0]);
-    const res = await fetch("/api/network/import", { method: "POST", body: fd });
-    const r = await res.json().catch(() => ({}));
-    e.target.value = "";
-    if (!res.ok) return toast(r.detail || `Import failed (${res.status})`);
-    toast(`Added ${r.added} people`); S.overview = null; renderNetwork();
-  };
-}
-
-// ---------- router ----------------------------------------------------------------
-async function route() {
-  closeSheet();
-  if ("speechSynthesis" in window) window.speechSynthesis.cancel();  // leaving the Brief stops the read-out
-  const [tab, arg] = (location.hash.slice(1) || "brief").split("/");
-  document.querySelectorAll("nav.tabs a").forEach((a) => (a.dataset.tab === tab ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
-  window.scrollTo(0, 0);
-  try {
-    if (tab === "ask") await renderAsk(arg ? decodeURIComponent(arg) : "");
-    else if (tab === "network") await renderNetwork();
-    else await renderBrief();
+    const q = new URLSearchParams({ window: state.window, price: state.price, volume: state.volume });
+    state.brief = await api("/api/brief?" + q);
+    renderBrief(state.brief);
   } catch (e) {
-    $app.innerHTML = e.message === "locked"
-      ? `<h1 class="lede">This prototype is private.</h1><p class="sub">Open the link with your access key, for example /?key=…</p>`
-      : `<p class="empty">Something went wrong: ${esc(e.message)}. Pull to refresh.</p>`;
+    el.innerHTML = `<div class="empty">Couldn't load the Brief. ${esc(e.message)}</div>`;
   }
 }
-window.addEventListener("hashchange", route);
-route();
+
+// ------------------------------------------------------------------ Listen (TTS)
+const synth = "speechSynthesis" in window ? window.speechSynthesis : null;
+let speaking = false;
+
+function stopSpeaking() {
+  if (synth) synth.cancel();
+  speaking = false;
+  $("#listen").setAttribute("aria-pressed", "false");
+}
+
+function speakBrief() {
+  if (!synth) { flash("Read-aloud isn't supported in this browser."); return; }
+  if (speaking) { stopSpeaking(); return; }
+  const lines = (state.brief && state.brief.speech) || [];
+  if (!lines.length) { flash("Nothing to read in this window."); return; }
+  synth.cancel();
+  const voice = synth.getVoices().find(v => v.lang === "en-IN") || synth.getVoices().find(v => v.lang && v.lang.startsWith("en"));
+  speaking = true;
+  $("#listen").setAttribute("aria-pressed", "true");
+  lines.forEach((text, idx) => {
+    const u = new SpeechSynthesisUtterance(text.replace(/₹/g, "rupees "));
+    if (voice) u.voice = voice;
+    u.rate = 1.04;
+    if (idx === lines.length - 1) u.onend = () => stopSpeaking();
+    u.onerror = () => stopSpeaking();
+    synth.speak(u);
+  });
+}
+
+function flash(msg) {
+  const el = state.tab === "ask" ? $("#ask-msg") : $("#asof");
+  el.textContent = msg;
+}
+
+// ------------------------------------------------------------------ Ask
+const STATUSES = ["Reading statements…", "Checking transcripts…", "Grading guidance against results…", "Building the facts pack…", "Matching network…"];
+
+function loadingView() {
+  const el = $("#ask-body");
+  el.innerHTML = `<div class="loading" role="status" aria-live="polite"><span class="pulse-dots"><i></i><i></i><i></i></span><div class="status">${STATUSES[0]}</div><div class="elapsed">0s</div></div>`;
+  const t0 = Date.now();
+  let i = 0;
+  const timer = setInterval(() => {
+    i = Math.min(i + 1, STATUSES.length - 1);
+    const s = $(".loading .status", el), e = $(".loading .elapsed", el);
+    if (s) s.textContent = STATUSES[i];
+    if (e) e.textContent = Math.round((Date.now() - t0) / 1000) + "s" + (Date.now() - t0 > 9000 ? " · first look at a new ticker takes 10–15s" : "");
+  }, 2200);
+  return () => clearInterval(timer);
+}
+
+const STATUS_LABEL = { met: "Met", beat: "Beat", missed: "Missed", on_track: "On track", tracking_below: "Tracking below",
+  over_plan: "Over plan", under_plan: "Under plan", needs_judgement: "Needs judgement", pending: "Pending", no_data: "No data" };
+
+function renderResearch(r) {
+  const g = r.guidance;
+  // One row per (year, metric): the latest statement is graded; earlier ones fold into a
+  // single "how it moved" line. Needs-judgement items keep their own rows (never merged).
+  const groups = new Map();
+  for (const it of g.items) {
+    const key = it.verdict.status === "needs_judgement" ? `${it.period}|${it.metric}|${it.sentence_id}` : `${it.period}|${it.metric}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);                       // API order: by call date within a group
+  }
+  const quote = it => `<blockquote class="quote">“${esc(it.quote)}”<cite>${esc(it.call)} concall, page ${esc(it.page)} · sentence #${esc(it.sentence_id)} · selected by ${esc(it.selected_by)}</cite></blockquote>`;
+  const rowsByPeriod = {};
+  for (const list of groups.values()) {
+    const it = list[list.length - 1];
+    const moves = g.drift.filter(d => d.period === it.period && d.metric === it.metric && d.direction !== "maintained");
+    const moved = moves.length ? `<ul class="drift">${moves.map(d => `<li><span class="${esc(d.direction)}">${d.direction === "cut" ? "Cut" : "Raised"}</span> ${esc(d.from)} <span class="fine">(${esc(d.from_call)})</span> → ${esc(d.to)} <span class="fine">(${esc(d.to_call)})</span></li>`).join("")}</ul>` : "";
+    (rowsByPeriod[it.period] = rowsByPeriod[it.period] || []).push(`
+      <div class="promise">
+        <div class="line"><span class="what">${esc(it.label)} ${esc(it.target)}</span><span class="verdict v-${esc(it.verdict.status)}">${esc(STATUS_LABEL[it.verdict.status] || it.verdict.status)}</span><span class="fine">${esc(it.call)}</span></div>
+        <div class="actual">${esc(it.verdict.text)}</div>${moved}
+        <details><summary>Management's words${list.length > 1 ? ` · ${list.length} statements` : ` · p.${esc(it.page)}`}</summary>${list.slice().reverse().map(quote).join("")}</details>
+      </div>`);
+  }
+  const promises = Object.keys(rowsByPeriod).sort().reverse().map(p => `<h3>${esc(p)}</h3>` + rowsByPeriod[p].join("")).join("");
+  const drift = "";
+
+  const s = r.financial_snapshot;
+  const t = r.trajectory || {};
+  const last = r.annual && r.annual.length ? r.annual[r.annual.length - 1] : null;
+  const kv = [
+    t.revenue_cagr != null && ["Revenue CAGR " + esc(t.from) + "–" + esc(t.to), pct(t.revenue_cagr, false)],
+    t.pat_cagr != null && ["PAT CAGR", pct(t.pat_cagr, false)],
+    last && last.ebitda_margin != null && ["EBITDA margin " + esc(last.label), pct(last.ebitda_margin, false)],
+    last && last.cfo_to_pat != null && ["CFO / PAT " + esc(last.label), last.cfo_to_pat.toFixed(2) + "x"],
+    last && last.debt_to_equity != null && ["Debt / Equity", last.debt_to_equity.toFixed(2) + "x"],
+    last && last.roce != null && ["ROCE", pct(last.roce, false)],
+  ].filter(Boolean).map(([k, v]) => `<div><small>${k}</small><b>${v}</b></div>`).join("");
+
+  const factText = Object.fromEntries(r.facts.map(f => [f.id, f.text]));
+  const bbList = pts => pts.map(p => `<li>${esc(p.point)} <span class="cite" title="${esc(p.facts.map(id => id + ": " + (factText[id] || "")).join("\n"))}">${esc(p.facts.join(", "))}</span></li>`).join("");
+  const net = (r.network || []).map(n => `<div class="person"><div class="who"><b>${esc(n.person)}</b></div><div class="why">${esc(n.why.join(" · "))}</div>${n.insider.is_insider ? `<div class="caution">⚠ ${esc(n.insider.caution)}</div>` : ""}</div>`).join("");
+  const sources = r.sources.map(x => { const u = safeUrl(x.url); return `<li>${u ? `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(x.kind)}</a>` : esc(x.kind)}${x.pages ? " · " + esc(x.pages) + " pp" : ""}</li>`; }).join("");
+
+  $("#ask-body").innerHTML = `
+    <div class="rhead"><h1>${esc(r.symbol)}</h1>${r.data.synthetic ? '<span class="tag demo">SYNTHETIC DEMO</span>' : `<span class="tag">${esc(r.data.source)}</span>`}</div>
+    <h2>Did management deliver?</h2>
+    <div class="panel">${promises || '<p class="fine">No quantified guidance found in the last four transcripts.</p>'}
+      ${drift ? `<h3>How guidance moved</h3><ul class="drift">${drift}</ul>` : ""}
+      <p class="fine">Mode: ${g.mode === "model" ? "model picked sentence IDs; every number checked in code" : "rules only (no model)"} · ${esc(g.candidates)} of ${esc(g.sentences)} sentences considered${g.rejected.length ? " · " + g.rejected.length + " model picks rejected" : ""}</p>
+    </div>
+    ${s ? `<h2>${esc(s.quarter)} snapshot</h2><div class="panel">${numsTable(s.rows)}<p class="fine">vs ${esc(s.prev || "—")} (QoQ) and ${esc(s.year_ago || "—")} (YoY). Screener tables, ₹ crore.</p></div>` : ""}
+    ${kv ? `<h2>Trajectory & balance sheet</h2><div class="kv">${kv}</div>` : ""}
+    <h2>Bull vs bear</h2>
+    <div class="bb"><div class="panel bull"><h3>Bull</h3><ul>${bbList(r.bull_bear.bull) || "<li class='fine'>No supporting facts.</li>"}</ul></div>
+      <div class="panel bear"><h3>Bear</h3><ul>${bbList(r.bull_bear.bear) || "<li class='fine'>No opposing facts.</li>"}</ul></div></div>
+    <p class="fine">Every point cites numbered facts computed in code (${esc(r.bull_bear.mode)} mode). Tap a citation to see it.</p>
+    ${net ? `<h2>Who you could call</h2><div class="panel">${net}</div>` : ""}
+    <h2>Primary sources</h2><ul class="sources">${sources}</ul>`;
+}
+
+async function runAsk(raw) {
+  const q = (raw || "").trim();
+  const msg = $("#ask-msg");
+  msg.className = "msg";
+  if (!q) { msg.textContent = "Type a ticker or company name."; return; }
+  if (state.askCtrl) state.askCtrl.abort();
+  let symbol = q.toUpperCase();
+  if (!/^[A-Z0-9&-]{1,20}$/.test(symbol)) {
+    try {
+      const r = await api("/api/resolve?q=" + encodeURIComponent(q));
+      if (!r.symbol) { msg.className = "msg err"; msg.textContent = `Couldn't match “${q}” to an NSE ticker. Try the symbol, e.g. DIXON.`; return; }
+      symbol = r.symbol;
+    } catch (e) { msg.className = "msg err"; msg.textContent = e.message; return; }
+  }
+  $("#ask-input").value = symbol;
+  msg.textContent = "";
+  store.set("recent", [symbol, ...store.get("recent", []).filter(s => s !== symbol)].slice(0, 5));
+  renderSuggest();
+  const ctrl = new AbortController();
+  state.askCtrl = ctrl;
+  const stop = loadingView();
+  try {
+    const r = await api("/api/research/" + encodeURIComponent(symbol), { signal: ctrl.signal });
+    if (ctrl.signal.aborted) return;
+    renderResearch(r);
+  } catch (e) {
+    if (e.name === "AbortError") return;
+    $("#ask-body").innerHTML = "";
+    msg.className = "msg err";
+    msg.textContent = e.message;
+  } finally {
+    stop();
+  }
+}
+
+function renderSuggest() {
+  const recent = store.get("recent", []);
+  const picks = [...new Set([...recent, "DEMOCHEM", "DIXON", "KAYNES", "DEEPAKNTR"])].slice(0, 6);
+  $("#ask-suggest").innerHTML = picks.map(s => `<button type="button" class="chip" data-sym="${esc(s)}">${esc(s)}</button>`).join("");
+}
+
+// ------------------------------------------------------------------ Ask by voice
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog = null;
+
+function stopListening() {
+  if (recog) { try { recog.abort(); } catch { /* already stopped */ } recog = null; }
+  $("#mic").classList.remove("listening");
+}
+
+function listen() {
+  const msg = $("#ask-msg");
+  msg.className = "msg";
+  if (recog) { stopListening(); return; }
+  if (!Recognition) { msg.textContent = "Voice input isn't available in this browser. Type a ticker instead."; return; }
+  if (!window.isSecureContext) { msg.className = "msg err"; msg.textContent = "Voice needs a secure (https) page. Type a ticker instead."; return; }
+  recog = new Recognition();
+  recog.lang = "en-IN";
+  recog.interimResults = false;
+  recog.maxAlternatives = 1;
+  $("#mic").classList.add("listening");
+  msg.textContent = "Listening… say a company, e.g. “Dixon”.";
+  recog.onresult = ev => {
+    const said = ev.results[0][0].transcript.replace(/[.?!]$/, "");
+    stopListening();
+    $("#ask-input").value = said;
+    runAsk(said);
+  };
+  recog.onerror = ev => {
+    stopListening();
+    msg.className = "msg err";
+    msg.textContent = ({
+      "not-allowed": "Microphone access is blocked. Allow it in your browser's site settings, or type a ticker.",
+      "service-not-allowed": "Microphone access is blocked. Allow it in your browser's site settings, or type a ticker.",
+      "no-speech": "Didn't catch that. Tap the mic and try again.",
+      "audio-capture": "No microphone found. Type a ticker instead.",
+      "network": "Voice recognition needs a connection. Type a ticker instead.",
+      "aborted": "",
+    })[ev.error] ?? "Voice input stopped. Type a ticker instead.";
+  };
+  recog.onend = () => { $("#mic").classList.remove("listening"); recog = null; };
+  try { recog.start(); } catch { stopListening(); msg.textContent = "Couldn't start the microphone. Type a ticker instead."; }
+}
+
+// ------------------------------------------------------------------ Network
+function renderNetwork(o, el) {
+  const calls = o.who_to_call.map(c => `<div class="person"><div class="who"><b>${esc(c.person)}</b><span class="sym">${esc(c.symbol)}</span></div><div class="why">${esc(c.why.join(" · "))}</div>${c.insider.is_insider ? `<div class="caution">⚠ ${esc(c.insider.caution)}</div>` : ""}</div>`).join("");
+  const paths = o.intro_paths.map(p => `<div class="person"><div class="who"><b>${esc(p.person)}</b><span class="fine">${esc(p.role || "")}</span></div>${pathChips(p.path)}${strengthBar(p.strength)}<div class="fine">${esc(p.hops.slice(1).join(" · "))}</div></div>`).join("");
+  const warm = o.warmups.map(w => `<div class="person"><div class="who"><b>${esc(w.name)}</b><span class="sym">${esc(w.symbol)}</span></div><div class="why">${esc(w.message)}</div></div>`).join("");
+  const blind = o.blind_spots.map(b => `<div class="blind"><span><span class="sym">${esc(b.symbol)}</span> ${esc(b.sector)}</span><span class="fine">${esc(b.weight_pct)}% of book</span></div>`).join("");
+  const exp = o.expertise.map(e => `<div class="person"><div class="who"><b>${esc(e.theme)}</b></div><div class="why">${esc(e.people.map(p => p.name).join(", "))}</div></div>`).join("");
+  el.innerHTML = `
+    <p class="fine lead">${esc(o.contacts)} contacts · matched locally, never sent to a model.</p>
+    ${blind ? `<h2>Blind spots · ${o.blind_spots.length}</h2><div class="panel">${blind}<p class="fine">Holdings where nobody you know has worked at the company or a peer.</p></div>` : ""}
+    ${warm ? `<h2>Warm up</h2><div class="panel">${warm}</div>` : ""}
+    ${paths ? `<h2>Second-degree reach</h2><div class="panel">${paths}</div>` : ""}
+    <h2>Who to call, by holding</h2><div class="panel">${calls || '<p class="fine">No links yet.</p>'}</div>
+    ${exp ? `<h2>Expertise map</h2><div class="panel">${exp}</div>` : ""}`;
+  applyBars(el);
+}
+
+async function loadNetwork() {
+  const el = $("#net-body");
+  el.innerHTML = `<div class="loading"><span class="pulse-dots"><i></i><i></i><i></i></span><div class="status">Mapping your network…</div></div>`;
+  try {
+    renderNetwork(await api("/api/network/overview"), el);
+    el.dataset.loaded = "1";
+  } catch (e) {
+    el.innerHTML = `<div class="empty">Couldn't load the network. ${esc(e.message)}</div>`;
+  }
+}
+
+async function importCsv(ev) {
+  ev.preventDefault();
+  const msg = $("#import-msg");
+  const f = $("#import-file").files[0];
+  msg.className = "msg";
+  if (!f) { msg.textContent = "Choose your Connections.csv first."; return; }
+  if (f.size > 5 * 1024 * 1024) { msg.className = "msg err"; msg.textContent = "That file is over 5 MB."; return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  msg.textContent = "Importing…";
+  try {
+    const r = await api("/api/network/import", { method: "POST", body: fd });
+    msg.textContent = `Added ${r.report.added} contacts · ${r.report.emails_dropped} email addresses dropped. ${r.note}`;
+    renderNetwork(r.overview, $("#net-body"));
+  } catch (e) {
+    msg.className = "msg err";
+    msg.textContent = e.message;
+  }
+}
+
+// ------------------------------------------------------------------ settings
+function syncSliders() {
+  $("#price").value = state.price; $("#volume").value = state.volume;
+  $("#price-out").textContent = "±" + Number(state.price).toFixed(1) + "%";
+  $("#volume-out").textContent = Number(state.volume).toFixed(1) + "×";
+}
+
+// ------------------------------------------------------------------ boot
+document.addEventListener("DOMContentLoaded", () => {
+  for (const b of $$(".tabbar [role=tab]")) b.addEventListener("click", () => showTab(b.dataset.tab));
+  for (const b of $$(".seg button")) {
+    b.setAttribute("aria-pressed", String(Number(b.dataset.window) === state.window));
+    b.addEventListener("click", () => {
+      stopSpeaking();
+      state.window = Number(b.dataset.window); store.set("window", state.window);
+      $$(".seg button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      loadBrief();
+    });
+  }
+  $("#listen").addEventListener("click", speakBrief);
+  if (!synth) $("#listen").title = "Read-aloud isn't supported in this browser";
+
+  const dlg = $("#settings");
+  $("#open-settings").addEventListener("click", () => { syncSliders(); dlg.showModal(); });
+  $("#price").addEventListener("input", e => { $("#price-out").textContent = "±" + Number(e.target.value).toFixed(1) + "%"; });
+  $("#volume").addEventListener("input", e => { $("#volume-out").textContent = Number(e.target.value).toFixed(1) + "×"; });
+  dlg.addEventListener("close", () => {
+    if (dlg.returnValue !== "save") return;
+    state.price = Number($("#price").value); state.volume = Number($("#volume").value);
+    store.set("price", state.price); store.set("volume", state.volume);
+    stopSpeaking(); loadBrief();
+  });
+
+  $("#ask-form").addEventListener("submit", e => { e.preventDefault(); stopListening(); runAsk($("#ask-input").value); });
+  $("#mic").addEventListener("click", listen);
+  $("#ask-suggest").addEventListener("click", e => { const b = e.target.closest("[data-sym]"); if (b) runAsk(b.dataset.sym); });
+  $("#import-form").addEventListener("submit", importCsv);
+
+  document.addEventListener("visibilitychange", () => { if (document.hidden) { stopSpeaking(); stopListening(); } });
+  window.addEventListener("pagehide", stopSpeaking);
+
+  api("/api/meta").then(m => {
+    const el = $("#mode");
+    el.textContent = m.mode === "zero-key" ? "Rules mode" : "Model + rules";
+    el.title = m.mode === "zero-key" ? "No model key: every view is computed by deterministic rules" : `Deep-tier fallbacks: ${m.deep_fallbacks}`;
+    el.hidden = false;
+  }).catch(() => {});
+
+  renderSuggest();
+  const start = (location.hash || "#brief").slice(1);
+  showTab(["brief", "ask", "network"].includes(start) ? start : "brief");
+  loadBrief();
+});

@@ -1,0 +1,14 @@
+{
+ "_note": "SYNTHETIC demo filings. They exist only to show network matching against the synthetic demo network. They are never written to the filings table, are labelled DEMO in the UI and announced as demo cards in voice. Real filings come from NSE.",
+ "cards": [
+  {"id": "DEMO:dixon-cfo", "symbol": "DIXON", "offset_hours": 3,
+   "subject": "Change in Management",
+   "body": "Dixon Technologies (India) Limited has informed the Exchange about Appointment of Mr. Rohit Bansal as Chief Financial Officer.",
+   "bio": {"name": "Mr. Rohit Bansal", "role": "Chief Financial Officer", "page": 2,
+           "profile": "Mr. Bansal is a chartered accountant. He was Chief Financial Officer at Syrma SGS Technology Limited (2021–2026) and earlier Deputy CFO at Amber Enterprises India Limited (2016–2021). He holds an MBA from IIM Ahmedabad.",
+           "employers": ["Syrma SGS Technology Limited", "Amber Enterprises India Limited"]}},
+  {"id": "DEMO:deepak-ma", "symbol": "DEEPAKNTR", "offset_hours": 5,
+   "subject": "Acquisition",
+   "body": "Deepak Nitrite Limited has informed the Exchange about acquisition of a specialty fluorochemicals business for an enterprise value of Rs. 1,150 crore."}
+ ]
+}

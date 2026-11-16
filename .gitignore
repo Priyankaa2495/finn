@@ -1,7 +1,26 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
-backend/data/finn.db
-.env
 .pytest_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local tooling / generated
+.claude/
+backend/eval/report_ci.json
+backend/eval/report_latest.json
+
+# Local databases (the committed snapshot will live under backend/snapshot/, not here)
+backend/data/
+
+# Privacy (Hard Rule 2): a real investor network never enters the repo.
+# Only synthetic demo profiles under backend/snapshot/network_demo/ are committed.
+**/network_private/
+*.network.json
+
+# local working notes
 IMPROVEMENT_LOG.md

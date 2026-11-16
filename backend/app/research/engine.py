@@ -1,174 +1,213 @@
-"""Pull: on-demand research for any NSE symbol, grounded only in primary sources.
+"""Pull orchestrator.
 
-  Layer 1 — deterministic (always on, free): snapshot, trajectory, balance sheet,
-            cash quality from the standardised statements.
-  Layer 2 — narrative vs numbers from concall transcripts (guidance.py).
-  Layer 3 — business mix + bull/bear: the model receives only Layer 1-2 facts and
-            the company's own investor-presentation pages; no web, no broker notes.
-  Plus the Network: who in my network can help me understand this company.
+Data (Option C): committed snapshot (backend/snapshot/research/<SYM>.json) first, then a
+local live-fetch cache younger than LIVE_TTL_HOURS, then a live fetch. Live fetches for one
+symbol are serialised by a per-symbol asyncio.Lock with a double-check after acquiring it,
+so N concurrent requests for an unseen ticker trigger exactly one scrape.
+(Per-process only: with several workers, a DB lease would replace the lock.)
+
+Analysis: metrics (code) -> guidance (fast model selects IDs, or rules) -> verdicts
+(code) -> facts pack -> bull/bear (deep model must cite fact IDs; numbers checked) or
+deterministic fallback.
 """
+from __future__ import annotations
+
+import asyncio
+import json
 import re
-import threading
-from datetime import date
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable
 
-from rapidfuzz import fuzz
+from .. import config, db
+from . import guidance as G
+from . import metrics as M
 
-from .. import db, llm
-from ..config import LLM_ENABLED
-from ..ingest import fundamentals
-from ..network import graph
-from ..network.resolve import org_index
-from . import guidance, metrics
+SNAPSHOT_DIR = config.BACKEND_DIR / "snapshot" / "research"
+CACHE_DIR = config.DATA_DIR / "research_cache"
+
+BULL_BEAR_SYSTEM = (
+    "You write a tight bull case and bear case for an equity investor using ONLY the numbered "
+    "facts provided. No outside knowledge, no news, no estimates. Every point must cite one or "
+    "more fact IDs, and every number you write must appear in a cited fact. Max 3 points per side, "
+    "max 25 words each. Reply with JSON only: "
+    '{"bull": [{"point": "...", "facts": ["F1"]}], "bear": [{"point": "...", "facts": ["F2"]}]}'
+)
+MAX_POINTS = 3
 
 
-def _business_mix(d):
-    """Segments / revenue mix from the latest investor presentation (company's own deck)."""
-    calls = (d.get("documents") or {}).get("concalls", [])
-    ppt = next((c for c in calls if c.get("ppt")), None)
-    if not (LLM_ENABLED and ppt):
+def _load_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
-    pages = fundamentals.document_text(ppt["ppt"], max_pages=30) or []
-    rel = []
-    for i, t in enumerate(pages, 1):
-        if re.search(r"segment|revenue mix|business mix|vertical|division|contribution", t or "", re.I):
-            rel.append("(p%d) %s" % (i, re.sub(r"\s+", " ", t)[:1500]))
-    rel = rel[:6]
-    if not rel:
+
+
+class ResearchEngine:
+    def __init__(self, llm: Callable | None = None, *, snapshot_dir: Path = SNAPSHOT_DIR,
+                 cache_dir: Path = CACHE_DIR, fetch_live: Callable[[str], dict] | None = None,
+                 ttl_hours: float = config.LIVE_TTL_HOURS):
+        self.llm = llm
+        self.snapshot_dir = Path(snapshot_dir)
+        self.cache_dir = Path(cache_dir)
+        self.ttl = timedelta(hours=ttl_hours)
+        self._fetch_live = fetch_live
+        self._locks: dict[str, asyncio.Lock] = {}
+        self.live_fetches = 0
+
+    # ---------------------------------------------------------------- data
+    def _cached(self, sym: str) -> dict | None:
+        snap = _load_json(self.snapshot_dir / f"{sym}.json")
+        if snap:
+            return snap
+        live = _load_json(self.cache_dir / f"{sym}.json")
+        if live and live.get("fetched_at"):
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(live["fetched_at"])
+            if age < self.ttl:
+                return live
         return None
-    out = llm.complete(
-        "From these investor-presentation pages, extract the company's business segments and revenue "
-        "share. JSON {\"period\": str, \"segments\": [{\"name\": str, \"share_pct\": number|null, "
-        "\"growth_pct\": number|null, \"page\": int}]}. Only numbers printed on the pages.\n\n" + llm.untrusted("\n".join(rel), 9000),
-        tier="fast")
-    if out:
-        out["source"] = {"type": "Investor presentation", "date": ppt["date"], "url": ppt["ppt"]}
-    return out
+
+    def _store(self, sym: str, bundle: dict) -> None:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        (self.cache_dir / f"{sym}.json").write_text(json.dumps(bundle), encoding="utf-8")
+
+    def _live(self, sym: str) -> dict:
+        if self._fetch_live is None:
+            from ..ingest.screener import fetch_bundle
+            return fetch_bundle(sym)
+        return self._fetch_live(sym)
+
+    async def get_bundle(self, symbol: str) -> dict:
+        sym = symbol.strip().upper()
+        if not re.fullmatch(r"[A-Z0-9&\-]{1,20}", sym):
+            raise ValueError(f"invalid symbol {symbol!r}")
+        bundle = self._cached(sym)
+        if bundle:
+            return bundle
+        lock = self._locks.setdefault(sym, asyncio.Lock())  # atomic: no await between get and set
+        async with lock:
+            bundle = self._cached(sym)                       # someone may have fetched while we waited
+            if bundle:
+                return bundle
+            self.live_fetches += 1
+            bundle = await asyncio.to_thread(self._live, sym)
+            bundle.setdefault("fetched_at", db.utcnow_iso())
+            self._store(sym, bundle)
+            return bundle
+
+    async def research(self, symbol: str) -> dict:
+        bundle = await self.get_bundle(symbol)
+        return await asyncio.to_thread(analyse, bundle, self.llm)
 
 
-def _bull_bear(name, facts):
-    if LLM_ENABLED and facts:
-        listing = "\n".join(f"[{i}] {f}" for i, f in enumerate(facts))
-        out = llm.complete(
-            f"Company: {name}. Using ONLY these numbered facts derived from its own filings and "
-            f"transcripts, write a tight bull case and bear case (3 points each, <=18 words). "
-            f"Each point must cite fact ids. No outside knowledge.\n{listing}\n\n"
-            "JSON {\"bull\": [{\"point\": str, \"facts\": [int]}], \"bear\": [...]}",
-            tier="deep", system="You are a sceptical buy-side analyst. Never introduce a number not in the facts.")
-        if out and out.get("bull"):
-            dropped = 0
-            for side in ("bull", "bear"):
-                kept = []
-                for p in out.get(side, []) or []:
-                    if isinstance(p, dict) and supported(p.get("point", ""), p.get("facts", []), facts):
-                        kept.append(p)
-                    else:
-                        dropped += 1
-                out[side] = kept
-            out["method"], out["dropped_unsupported"] = "llm:deep", dropped
-            return out
-    return None
+# ------------------------------------------------------------------ analysis
+def analyse(bundle: dict, llm: Callable | None = None) -> dict:
+    sym = bundle["symbol"]
+    fin = M.Financials.from_dict(sym, bundle["financials"])
+    rows = M.annual_rows(fin)
+    book = M.FactBook()
+    M.financial_facts(fin, book)
 
+    g = G.extract_guidance(bundle.get("transcripts", []), llm)
+    items: list[G.GuidanceItem] = sorted(g["items"], key=lambda i: (i.fy, i.metric, i.call_date))
+    verdicts = {i: G.evaluate(it, fin) for i, it in enumerate(items)}
+    drifts = G.drift(items)
+    G.guidance_facts(items, verdicts, drifts, book)
 
-def supported(point, ids, facts):
-    """A bull/bear point survives only if it cites real facts AND every number it states
-    appears in those facts (to the precision written: '59%' is supported by '58.9%')."""
-    ids = [i for i in (ids or []) if isinstance(i, int) and 0 <= i < len(facts)]
-    if not ids:
-        return False
-    cited = [float(x.replace(",", "")) for i in ids for x in re.findall(r"\d[\d,]*(?:\.\d+)?", facts[i])]
-    for raw in re.findall(r"\d[\d,]*(?:\.\d+)?", point or ""):
-        v = float(raw.replace(",", ""))
-        tol = 0.5 * 10 ** -(len(raw.split(".")[1]) if "." in raw else 0)
-        if not any(abs(v - c) <= tol + 1e-9 for c in cited):
-            return False
-    return True
-
-
-def _org_for(symbol, d):
-    idx = org_index()
-    oid = idx.by_ticker.get(symbol)
-    if oid:
-        return oid, None
-    oid, conf = idx.resolve(d.get("name", ""))
-    if oid:
-        return oid, None
-    # Unknown company: map screener's industry labels onto the themes our network knows
-    themes = set()
-    for label in d.get("industry", []):
-        for t in graph.all_themes():
-            if fuzz.token_set_ratio(label.lower(), t) >= 80:
-                themes.add(t)
-    return None, sorted(themes)
-
-
-NSE_SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9&-]{0,19}")  # e.g. M&M, BAJAJ-AUTO, 3MINDIA
-
-
-_LOCKS: dict[str, threading.Lock] = {}
-_LOCKS_GUARD = threading.Lock()
-
-
-def research(symbol: str):
-    symbol = (symbol or "").upper().strip()
-    if not NSE_SYMBOL.fullmatch(symbol):  # validate before it becomes part of an outbound URL
-        return {"symbol": symbol[:24], "error": "That isn't an NSE symbol (letters, digits, & or -, up to 20)."}
-    # A first look scrapes screener, downloads 4 transcripts and may call the model (~20s).
-    # A double tap must not do that twice: the second request waits, then reads the cache.
-    with _LOCKS_GUARD:
-        lock = _LOCKS.setdefault(symbol, threading.Lock())
-    with lock:
-        return _research(symbol)
-
-
-def _research(symbol: str):
-    cache_key = f"research:{symbol}:{date.today().isoformat()}"
-    cached = db.kv_get(cache_key)
-    if cached:
-        return cached
-    d = fundamentals.fetch(symbol)
-    if not d:
-        return {"symbol": symbol, "error": f"No data found for {symbol}. Is it a valid NSE symbol?"}
-
-    snap = metrics.snapshot(d)
-    traj = metrics.trajectory(d)
-    bs = metrics.balance_sheet(d)
-    cash = metrics.cash_quality(d)
-    g = guidance.analyse(d)
-    mix = _business_mix(d)
-
-    # Facts pack for the bull/bear: only things we computed or quoted
-    facts = []
-    for sec in (traj, bs, cash):
-        for sign, text in (sec or {}).get("flags", []):
-            facts.append(text)
-    for it in g["items"][:8]:
-        # Only outcomes that were actually checked are facts. "Not checkable" notes made the
-        # model write bear points like "capacity claims are not checkable" (live DIXON).
-        checked = it["check"]["status"] in ("delivered", "on_track", "close", "slightly_behind", "behind", "missed")
-        facts.append(f"Guidance ({it['call']}): \"{it['quote'][:200]}\""
-                     + (f" — {it['check'].get('detail', '')} ({it['check']['status']})" if checked else ""))
-    for dr in g["drift"]:
-        facts.append(f"{dr['metric']} guidance for {dr['fy']} was {dr['trend']} across calls")
-    if snap.get("pe"):
-        facts.append(f"Trades at {snap['pe']}x earnings; ROCE {snap.get('roce')}%, ROE {snap.get('roe')}%")
-    bb = _bull_bear(d.get("name", symbol), facts) or {
-        "bull": [{"point": t} for sec in (traj, bs, cash) for s, t in (sec or {}).get("flags", []) if s == "+"][:3],
-        "bear": [{"point": t} for sec in (traj, bs, cash) for s, t in (sec or {}).get("flags", []) if s == "-"][:3],
-        "method": "rules"}
-
-    oid, themes = _org_for(symbol, d)
-    people = graph.who_to_call(oid, limit=4) if oid else graph.who_to_call(symbol.lower(), limit=4, themes=themes)
-
-    out = {
-        "symbol": symbol, "name": d.get("name") or symbol, "basis": d.get("basis"),
-        "fetched_at": d.get("fetched_at"), "synthetic": d.get("synthetic", False),
-        "about": d.get("about", ""), "industry": d.get("industry", []),
-        "snapshot": snap, "mix": mix, "trajectory": traj, "quarterly": metrics.quarterly(d),
-        "balance_sheet": bs, "cash": cash, "guidance": g, "bull_bear": bb,
-        "people": people,
-        "sources": [{"type": "Standardised financials", "url": f"https://www.screener.in/company/{symbol}/"}]
-                   + g["sources"] + ([mix["source"]] if mix and mix.get("source") else []),
-        "llm": LLM_ENABLED,
+    return {
+        "symbol": sym,
+        "data": {"source": bundle.get("source", "snapshot"), "fetched_at": bundle.get("fetched_at"),
+                 "synthetic": bool(bundle.get("synthetic"))},
+        "sources": _sources(bundle),
+        "financial_snapshot": M.quarter_snapshot(fin),
+        "annual": rows,
+        "trajectory": M.trajectory(rows),
+        "guidance": {
+            "mode": g["mode"], "sentences": g["sentences"], "candidates": g["candidates"],
+            "items": [_item_view(it, verdicts[i]) for i, it in enumerate(items)],
+            "drift": [_drift_view(d) for d in drifts],
+            "rejected": [{"sentence_id": r.sentence_id, "reason": r.reason} for r in g["rejections"]],
+        },
+        "facts": [{"id": f.id, "text": f.text, "polarity": f.polarity, "kind": f.kind} for f in book.facts],
+        "bull_bear": bull_bear(book, llm),
     }
-    db.kv_set(cache_key, out)
+
+
+def _sources(bundle: dict) -> list[dict]:
+    out = [{"kind": "financial tables (screener.in)", "url": bundle["financials"].get("source_url")}]
+    out += [{"kind": f"{t['call']} concall transcript", "url": t.get("url"), "pages": len(t["pages"])}
+            for t in bundle.get("transcripts", [])]
     return out
+
+
+def _item_view(it: G.GuidanceItem, v: G.Verdict) -> dict:
+    return {"metric": it.metric, "label": G.METRIC_LABEL[it.metric], "period": M.fy_label(it.fy),
+            "target": it.target.display(), "quote": it.quote, "call": it.call, "page": it.page,
+            "sentence_id": it.sentence_id, "source_url": it.url, "selected_by": it.selected_by,
+            "verdict": {"status": v.status, "actual": v.actual, "basis": v.basis, "text": v.text}}
+
+
+def _drift_view(d: G.Drift) -> dict:
+    return {"metric": d.metric, "period": M.fy_label(d.fy), "from": d.before.display(),
+            "to": d.after.display(), "from_call": d.before_call, "to_call": d.after_call,
+            "direction": d.direction}
+
+
+# ----------------------------------------------------------------- bull/bear
+def validate_points(points, facts: dict[str, M.Fact]) -> tuple[list[dict], list[dict]]:
+    ok, rejected = [], []
+    if not isinstance(points, list):
+        return ok, [{"point": None, "reason": "not a list"}]
+    for p in points:
+        if not isinstance(p, dict):
+            rejected.append({"point": None, "reason": "malformed point"})
+            continue
+        text = " ".join(str(p.get("point", "")).split())[:240]
+        ids = p.get("facts") if isinstance(p.get("facts"), list) else []
+        ids = [str(i) for i in ids]
+        if not text or not ids:
+            rejected.append({"point": text, "reason": "no fact citation"})
+            continue
+        unknown = [i for i in ids if i not in facts]
+        if unknown:
+            rejected.append({"point": text, "reason": f"cites unknown fact(s) {unknown}"})
+            continue
+        allowed = set().union(*(G.numbers_in(facts[i].text) for i in ids))
+        stray = G.numbers_in(text) - allowed
+        if stray:
+            rejected.append({"point": text, "reason": f"number(s) {sorted(stray)} not in cited facts"})
+            continue
+        ok.append({"point": text, "facts": ids})
+    return ok[:MAX_POINTS], rejected
+
+
+def _rules_bull_bear(book: M.FactBook) -> dict:
+    ranked = sorted(book.facts, key=lambda f: -f.weight)
+    bull = [{"point": f.text, "facts": [f.id]} for f in ranked if f.polarity > 0][:MAX_POINTS]
+    bear = [{"point": f.text, "facts": [f.id]} for f in ranked if f.polarity < 0][:MAX_POINTS]
+    return {"mode": "rules", "bull": bull, "bear": bear, "rejected": []}
+
+
+def bull_bear(book: M.FactBook, llm: Callable | None) -> dict:
+    if llm is None or not book.facts:
+        return _rules_bull_bear(book)
+    prompt = "FACTS:\n" + "\n".join(f"{f.id}: {f.text}" for f in book.facts)
+    raw = llm("deep", BULL_BEAR_SYSTEM, prompt)
+    if raw is None:
+        return _rules_bull_bear(book)
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError
+    except ValueError:
+        out = _rules_bull_bear(book)
+        out["rejected"] = [{"point": None, "reason": "model returned invalid JSON"}]
+        return out
+    facts = book.by_id()
+    bull, rej_b = validate_points(data.get("bull"), facts)
+    bear, rej_r = validate_points(data.get("bear"), facts)
+    rules = _rules_bull_bear(book)
+    return {"mode": "model",
+            "bull": bull or rules["bull"],      # a side with no valid point falls back to rules
+            "bear": bear or rules["bear"],
+            "rejected": rej_b + rej_r}

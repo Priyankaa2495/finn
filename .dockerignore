@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.env
+**/.env.*
+**/network_private
+backend/data
+backend/tests
+backend/eval
+backend/scripts
+README.md

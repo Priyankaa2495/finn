@@ -1,158 +1,197 @@
-"""Announcement classification into the 17 reference categories.
+"""Rule-first announcement classifier.
 
-Rules first. NSE already attaches a 'desc' (subject type) to every filing; combined
-with keywords from the attachment text that resolves the large majority of filings
-for free, instantly and explainably. Only genuinely ambiguous ones (generic
-'Updates', 'Outcome of Board Meeting' with no clear signal) go to the fast LLM tier.
+Pipeline (first hit wins):
+  1. Ordered regex rules on the NSE subject line. Generic subjects ("Outcome of
+     Board Meeting") are refined with body keywords, and fall back to a fixed
+     default if the body says nothing. Never a model.
+  2. If no subject rule fires, the same rules run over the start of the body.
+  3. Only if both miss AND a fallback is supplied is the model asked. It receives
+     sanitised, fenced text and must answer with one of CATEGORIES, or the answer
+     is discarded.
+
+Order matters: routine paperwork and narrow patterns sit above broad ones, so
+"Trading Window" never reads as insider_trading and "Appointment of Statutory
+Auditor" never reads as management_change.
 """
+from __future__ import annotations
+
 import re
+from dataclasses import dataclass
+from typing import Callable
 
-from .. import llm
+from .sanitize import fence
 
-CATEGORIES = ["results", "M&A", "fund_raise", "management_change", "litigation",
-              "insider_trading", "earnings_call", "investor_meetings", "credit_rating",
-              "dividend", "bonus_split", "capex", "press_release", "postal_ballot",
-              "agm_egm", "pledging", "unclassified"]
-
-# (category, pattern on exchange 'desc', pattern the text must ALSO match, or None) — order matters.
-# NSE's subject lines are a fixed taxonomy, so most rules key on them; the text condition
-# splits subjects that NSE uses for two different things.
-DESC_RULES = [
-    ("results", r"financial result|integrated filing.*financial", None),
-    # Reference doc: results include decks, shareholder letters and ads confirming results were published.
-    # (Held-out set, 16 Oct–7 Nov 2026: these were the largest block of results filed as routine.)
-    ("results", r"^investor presentation$", None),
-    ("results", r"newspaper publication|press release", r"financial results|results for the"),
-    ("management_change", r"change in (management|directorate|directors?\b)|appointment|resignation|cessation|"
-                          r"re-appointment|retirement", None),
-    ("press_release", r"bagging|receiving of orders|award of (order|contract)", None),
-    ("credit_rating", r"credit rating", None),
-    ("M&A", r"acquisition|amalgamation|merger|scheme of arrangement|demerger|joint venture|sale or disposal|"
-            r"restructuring", None),
-    ("insider_trading", r"insider trading|sebi \(pit\)|substantial acquisition|takeover", None),
-    ("pledging", r"pledge|encumbrance", None),
-    # NSE files earnings-call items and one-on-one fund meetings under the same subject
-    ("earnings_call", r"analysts?/institutional investor meet", r"transcript|recording|audio|earnings call|conference call"),
-    ("investor_meetings", r"analysts?/institutional investor meet|investor meet", None),
-    ("fund_raise", r"allotment of securities", r"preferential|qualified institutional|\bqip\b|rights issue|"
-                                               r"non[- ]convertible|debenture"),
-    ("fund_raise", r"raising of funds|issue of securities|qualified institutional|preferential issue|rights issue|"
-                   r"buy ?back|commercial paper|debentures", None),
-    ("earnings_call", r"con\.? ?call|conference call|earnings call|audio recording|transcript", None),
-    ("dividend", r"dividend", None),
-    ("dividend", r"record date", r"dividend"),
-    ("postal_ballot", r"shareholders? meeting", r"postal ballot"),
-    ("bonus_split", r"bonus|sub-division|split", None),
-    ("litigation", r"litigation|dispute|action\(s\) taken|orders passed|fraud|default|insolvency|penalty", None),
-    ("postal_ballot", r"postal ballot", None),
-    ("agm_egm", r"shareholders? meeting|annual general meeting|\bagm\b|\begm\b|extra-ordinary", None),
-    ("unclassified", r"trading window|newspaper publication|reg\.? 74|depositories and participants|loss of share|"
-                     r"esop|esos|esps|allotment of securities|book closure|record date|compliance|certificate|"
-                     r"spurt in volume|duplicate share|scrutinizer|business responsibility|esg|statement of deviation|"
-                     r"monitoring agency", None),
-]
-
-# Keyword rules on the attachment text (used for generic descs like 'Updates', 'Outcome of Board Meeting')
-TEXT_RULES = [
-    ("results", r"(un)?audited financial results|results for the (quarter|period|half[- ]year|year)"
-                r"( and half[- ]year)? ended"),
-    ("management_change", r"\b(appoint(ed|ment)|resign(ed|ation)|cessation|step(s|ped)? down)\b.*\b(chief|cfo|ceo|md|managing director|director|kmp|company secretary)\b"),
-    ("M&A", r"\b(acquir(e|ed|ing|sition)|merger|amalgamation|demerger|joint venture|stake sale|divest|"
-            r"binding term sheet|share purchase agreement)"),
-    ("capex", r"\b(capex|capital expenditure|new (plant|facility|unit)|greenfield|brownfield|capacity expansion)"),
-    ("fund_raise", r"\b(qip|preferential (issue|allotment)|rights issue|buyback|non-convertible debentures|ncds?|raise (up to )?(rs|₹|inr))"),
-    ("litigation", r"\b(show cause|penalty|order (passed|received)|demand notice|tribunal|nclt|search (and|&) seizure|tax demand)"),
-    ("dividend", r"\b(interim|final|special) dividend"),
-    ("credit_rating", r"\b(crisil|icra|care ratings|india ratings|brickwork)\b"),
-    ("press_release", r"\b(order (win|worth|received)|bags? (an? )?order|launch(es|ed)?|partnership|mou|clarification)"),
-    ("earnings_call", r"(earnings|conference|analyst) call"),
-    ("investor_meetings", r"(investor|analyst) (meet|meeting|conference)"),
-    # routine paperwork that arrives under a generic subject; settling it here saves a model call
-    ("unclassified", r"redemption of commercial paper|dematerial|loss of share|duplicate share"),
-]
+CATEGORIES: tuple[str, ...] = (
+    "results", "M&A", "fund_raise", "management_change", "litigation", "insider_trading",
+    "earnings_call", "investor_meetings", "credit_rating", "dividend", "bonus_split",
+    "capex", "press_release", "postal_ballot", "agm_egm", "pledging", "unclassified",
+)
 
 
-def classify(exchange_desc: str, text: str, use_llm=True):
-    """Returns (category, method, confidence)."""
-    d = (exchange_desc or "").lower()
-    t = (text or "").lower()
-    generic = re.search(r"^(updates?|general updates?|outcome of board meeting|press release|board meeting intimation)$", d.strip())
-    if not generic:
-        for cat, pat, text_pat in DESC_RULES:
-            if re.search(pat, d) and (text_pat is None or re.search(text_pat, t)):
-                return cat, "rule:desc", 0.95
-    for cat, pat in TEXT_RULES:
-        if re.search(pat, t):
-            return cat, "rule:text", 0.85
-    if "board meeting intimation" in d:
-        return "results" if "result" in t else "unclassified", "rule:desc", 0.7
-    if "press release" in d:
-        return "press_release", "rule:desc", 0.7
-    if use_llm and t:
-        out = llm.complete(
-            f"Exchange subject: {exchange_desc}\nFiling text:\n{llm.untrusted(text, 1500)}\n\n"
-            "Classify into exactly one category, using these definitions:\n" + DEFINITIONS +
-            '\nReply as JSON {"category": "...", "confidence": 0-1}.',
-            tier="fast", system=SYSTEM)
-        if out and out.get("category") in CATEGORIES:
-            return out["category"], "llm:fast", float(out.get("confidence", 0.6))
-    return "unclassified", "fallback", 0.3
+def _r(pattern: str) -> re.Pattern:
+    return re.compile(pattern, re.I)
 
 
-# The model only sees what rules couldn't settle, so it needs the taxonomy spelled out:
-# given bare labels it defaulted to 'unclassified' and buried a real fund-raise.
-# Definitions follow the challenge's reference document.
-DEFINITIONS = "\n".join(f"- {k}: {v}" for k, v in {
-    "results": "quarterly/annual results, the board meeting approving them, results decks",
-    "M&A": "acquisition, merger, demerger, joint venture, buying or selling a stake",
-    "fund_raise": "raising money: rights issue, QIP, preferential issue or allotment, buyback, debt such as "
-                  "commercial paper or NCDs, including the committee or board outcome approving one",
-    "management_change": "a CEO, CFO, MD or director joining, resigning or retiring",
-    "litigation": "lawsuits, regulatory orders, fines, warnings, insolvency proceedings",
-    "insider_trading": "a promoter or insider buying or selling their own shares",
-    "earnings_call": "the earnings-call notice, transcript or recording",
-    "investor_meetings": "meetings with specific investors or funds, investor conferences",
-    "credit_rating": "a rating assigned, upgraded, downgraded or reaffirmed",
-    "dividend": "a cash dividend declared, with its record date",
-    "bonus_split": "a bonus issue or stock split",
-    "capex": "approving spend on a new plant, facility or capacity",
-    "press_release": "general company news not covered above: order wins, products, partnerships, awards, "
-                     "a parent or group company's announcement, rumour clarifications",
-    "postal_ballot": "postal ballot notice or result",
-    "agm_egm": "AGM or EGM notice or result",
-    "pledging": "a promoter pledging or releasing shares",
-    "unclassified": "routine compliance paperwork that cannot move the stock: ESOP allotments, certificates, "
-                    "newspaper copies, shareholder reminders",
-}.items())
-SYSTEM = ("You classify Indian listed-company exchange filings for an investor. Burying a material filing "
-          "costs far more than surfacing a routine one, so use 'unclassified' only when the text is clearly "
-          "routine paperwork. Abbreviations are common: PI = preferential issue, QIP = qualified "
-          "institutional placement, NCD = non-convertible debenture.")
+@dataclass(frozen=True)
+class Rule:
+    name: str
+    pattern: re.Pattern
+    category: str                                    # default when no refinement hits
+    refine: tuple[tuple[str, re.Pattern], ...] = ()  # (category, body pattern), first hit wins
 
 
-_BOILER = re.compile(r"^.*?has informed the exchange (about|regarding|that|of)\s*", re.I)
+# ------------------------------------------------------------ body refinements
+_B_RESULTS = _r(r"financial results|\bunaudited\b|\baudited\b|results for the (quarter|half|year)|quarterly results")
+_B_FUND = _r(r"\bqip\b|qualified institutions? placement|preferential (issue|allotment)|rights issue|buy-?back"
+             r"|non-convertible debentures|\bncds?\b|commercial paper|raising of funds|fund ?rais")
+_B_MA = _r(r"acqui(re|sition)|amalgamation|\bmerger\b|demerger|scheme of arrangement|joint venture")
+_B_BONUS = _r(r"\bbonus\b|sub-?division|stock split|split of")
+_B_DIVIDEND = _r(r"\bdividend")
+_B_CAPEX = _r(r"\bcapex\b|capital expenditure|capacity expansion|new (plant|facility|manufacturing)|greenfield|brownfield")
+_B_MGMT = _r(r"\bappoint|\bresign|cessation|chief (executive|financial)|managing director")
+_B_EARNINGS = _r(r"earnings|results|transcript|audio|recording|\bq[1-4]\b")
+_B_RESULTS_NOTICE = _r(r"(meeting of the )?board of directors.{0,120}\b(consider|approve)\b.{0,160}\bresults"
+                       r"|analyst presentation|results presentation")
+
+_BOARD_REFINE = (
+    ("results", _B_RESULTS), ("fund_raise", _B_FUND), ("M&A", _B_MA), ("bonus_split", _B_BONUS),
+    ("dividend", _B_DIVIDEND), ("capex", _B_CAPEX), ("management_change", _B_MGMT),
+)
+
+# ------------------------------------------------------------------ the rules
+RULES: tuple[Rule, ...] = (
+    # Routine paperwork first so broad words below can't capture it.
+    Rule("trading_window", _r(r"trading\s*window"), "unclassified"),
+    Rule("routine_paperwork", _r(
+        r"compliance certificate|certificate under (sebi|reg)|depositories and participants"
+        r"|reg(ulation)?\.?\s*74\s*\(5\)|loss of (share )?certificate"
+        r"|duplicate (share )?certificate|newspaper (publication|advertisement|clippings?)|copy of newspaper"
+        r"|\besop\b|\besos\b|\besps\b|employee stock option|\bbrsr\b|business responsibility"
+        r"|\besg\b|sustainability report|registrar and (share )?transfer agent|\brta\b"
+        # eval 2026-11-15: NSE compliance subjects with no rule
+        r"|monitoring agency report|statement of deviations?|deviation\(?s?\)? or variation|reg(ulation)?\.?\s*32\b"),
+         "unclassified"),
+    # Only auditor appointments/changes are routine; "report of auditors on financial
+    # statements" is part of a results pack (eval 2026-11-15).
+    Rule("auditor", _r(r"(appointment|change|resignation|re-?appointment|cessation|rotation)\s+(of|in)\s+(the\s+)?"
+                       r"(statutory\s+|secretarial\s+|internal\s+|cost\s+|joint\s+)?auditors?"
+                       r"|\bauditors?\s+(appointment|rotation|resignation|change)"), "unclassified"),
+    # Meetings & calls. NSE's "Analysts/Institutional Investor Meet/Con. Call Updates"
+    # covers both, so it is refined on the body. A board meeting to approve results filed
+    # under this subject is results (eval 2026-11-15, RELIANCE).
+    Rule("analyst_meet", _r(r"analysts?\s*/\s*institutional investor|investor meet|analyst meet"
+                            r"|analyst\(?s?\)?\s*/\s*investor\(?s?\)?\s*meet|investor conference|non-deal roadshow"),
+         "investor_meetings", (("results", _B_RESULTS_NOTICE), ("earnings_call", _B_EARNINGS))),
+    Rule("earnings_call", _r(r"transcript|audio recording|video recording|earnings call|conference call"
+                             r"|con\.?\s?call|concall"), "earnings_call"),
+    Rule("credit_rating", _r(r"credit rating|\bratings?\b"), "credit_rating"),
+    Rule("pledging", _r(r"pledg|encumbr|regulation\s*31\b"), "pledging"),
+    Rule("insider_trading", _r(r"insider trading|prohibition of insider|regulation\s*7\s*\(\s*[23]|\bsast\b"
+                               r"|regulation\s*29\b"), "insider_trading"),
+    # Generic board subjects: refined on the body, never sent to a model.
+    Rule("board_outcome", _r(r"outcome of (the )?board meeting|board meeting outcome"),
+         "press_release", _BOARD_REFINE),
+    Rule("board_intimation", _r(r"board meeting intimation|intimation of board meeting|prior intimation"
+                                r"|notice of board meeting"), "unclassified", _BOARD_REFINE),
+    Rule("postal_ballot", _r(r"postal ballot|e-?voting|scrutini[sz]er"), "postal_ballot"),
+    Rule("agm_egm", _r(r"\bagm\b|\begm\b|annual general meeting|extra-?ordinary general meeting|general meeting"),
+         "agm_egm"),
+    Rule("results", _r(r"financial results?|\bresults?\b|integrated filing.{0,5}financ|investor presentation"
+                       r"|earnings presentation|shareholders'? letter|analyst presentation"
+                       r"|financial statements for the (quarter|half|year|period)|limited review report"), "results"),
+    Rule("management_change", _r(r"change in (management|directors?|key managerial|kmp|senior management)"
+                                 r"|\bappointment|re-?appointment|resignation|cessation|\bretire|demise"
+                                 r"|chief (executive|financial|operating)|managing director"), "management_change"),
+    Rule("bonus_split", _r(r"\bbonus\b|stock split|sub-?division|split of (equity )?shares"), "bonus_split"),
+    Rule("dividend", _r(r"\bdividend"), "dividend"),
+    Rule("record_date", _r(r"record date|book closure"), "unclassified",
+         (("bonus_split", _B_BONUS), ("dividend", _B_DIVIDEND), ("fund_raise", _B_FUND))),
+    Rule("fund_raise", _r(r"\bqip\b|qualified institutions?|preferential|rights issue|buy-?back|commercial paper"
+                          r"|debentures?|\bncds?\b|fund ?raising|raising of funds"
+                          r"|allotment of (equity|securities|shares|warrants)|issue of securities"
+                          r"|first and final call|call money|partly paid|initial public offer|\bipo\b"),
+         # ESOP allotments filed under "Allotment of Securities" are routine (eval 2026-11-15)
+         "fund_raise", (("unclassified", _r(r"\besop|\besps|\besos|employee stock")),)),
+    Rule("m_and_a", _r(r"acqui|\bmerger\b|amalgamation|demerger|scheme of arrangement|joint venture|\bjv\b"
+                       r"|incorporation of (a )?(wholly[- ]owned )?subsidiary|investment in (wholly[- ]owned )?subsidiar"
+                       r"|sale of (stake|shares|subsidiary)|divest|disinvest|slump sale"
+                       r"|business transfer agreement|share purchase agreement|shareholders'? agreement"
+                       r"|term sheet|\brestructuring\b"), "M&A"),
+    Rule("capex", _r(r"\bcapex\b|capital expenditure|capacity expansion|capacity addition|new (plant|facility|unit)"
+                     r"|greenfield|brownfield|commercial production|commission(ing|ed)"
+                     r"|expansion of .{0,40}\b(plant|facility|centre|center|campus|capacity|unit)\b"), "capex"),
+    Rule("litigation", _r(r"litigation|dispute|regulatory action|penalt|\bfines?\b|show[- ]?cause|demand (notice|order)"
+                          r"|tax demand|insolvency|\bnclt\b|\bcirp\b|winding up|search (and|&) seizure"
+                          r"|enforcement directorate|warning letter|import alert|form 483"
+                          r"|actions?\(?s?\)? taken or orders? passed|orders? passed by"), "litigation"),
+    Rule("order_win", _r(r"bagging|receiving of orders?|order (win|inflow)|bags? (an? )?order|letter of award"
+                         r"|\bloa\b|\bcontracts?\b"), "press_release"),
+    Rule("press_release", _r(r"press release|media release|clarification|news verification|spurt in"
+                             r"|general updates?|\bupdates?\b|\blaunch|partnership|tie-?up|\bmou\b"
+                             r"|memorandum of understanding|\baward"),
+         # A press release on the quarter's performance is the results release (eval 2026-11-15)
+         "press_release", (("results", _r(r"performance of the company for the (quarter|half|year)"
+                                          r"|(un)?audited financial results")),)),
+)
+
+assert all(r.category in CATEGORIES for r in RULES)
+assert all(c in CATEGORIES for r in RULES for c, _ in r.refine)
 
 
-def clean_text(text: str) -> str:
-    """NSE attachment text is mostly 'X Limited has informed the Exchange about ...'.
-    Strip the boilerplate so a deterministic one-liner is readable without an LLM."""
-    t = _BOILER.sub("", (text or "").strip())
-    t = re.sub(r"\s+", " ", t)
-    t = re.sub(r"^(that |its |the company )+", "", t, flags=re.I)
-    return (t[:1].upper() + t[1:]) if t else ""
+@dataclass(frozen=True)
+class Classification:
+    category: str
+    source: str            # subject | subject+body | body | model | model_rejected | none
+    rule: str | None
+    model_called: bool = False
 
 
-def mgmt_signal(text: str) -> dict:
-    """Who, which role, joining or leaving — regex over the filing text."""
-    t = text or ""
-    role = None
-    for r, pat in (("CEO", r"\b(ceo|chief executive)"), ("CFO", r"\b(cfo|chief financial)"),
-                   ("MD", r"\b(md|managing director)\b"), ("Chairman", r"\bchair(man|person)\b"),
-                   ("COO", r"\b(coo|chief operating)"), ("Independent Director", r"independent director"),
-                   ("Company Secretary", r"company secretary|compliance officer"), ("Director", r"\bdirector\b")):
-        if re.search(pat, t, re.I):
-            role = r
-            break
-    leaving = bool(re.search(r"resign|cessation|step(s|ped)? down|superannuat|retire", t, re.I))
-    m = re.search(r"(?:Mr\.?|Ms\.?|Mrs\.?|Dr\.?|Shri)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z.]+){0,3})", t)
-    return {"role": role, "leaving": leaving, "person": m.group(1).strip() if m else None}
+# A fallback takes fenced text and returns a category string (or anything else, which is rejected).
+ModelFallback = Callable[[str], str]
+
+_BODY_SCAN_CHARS = 1500
+
+
+def _match(text: str) -> Rule | None:
+    for rule in RULES:
+        if rule.pattern.search(text):
+            return rule
+    return None
+
+
+# NSE files a large share of announcements under a bare "Updates" subject with the
+# real headline in the body ("... informed the Exchange regarding 'Earnings Call
+# Transcript'"). Such subjects carry no signal: classify on the body, default to
+# press_release, never escalate to a model.
+_OPAQUE_SUBJECT = re.compile(r"^\s*(general\s+)?updates?\s*$", re.I)
+
+
+def classify(subject: str, body: str = "", llm_fallback: ModelFallback | None = None) -> Classification:
+    subject = subject or ""
+    body = body or ""
+
+    if _OPAQUE_SUBJECT.match(subject):
+        rule = _match(body[:_BODY_SCAN_CHARS])
+        if rule:
+            return Classification(rule.category, "body", rule.name)
+        return Classification("press_release", "subject", "opaque_update")
+
+    rule = _match(subject)
+    if rule:
+        for category, pattern in rule.refine:
+            if pattern.search(body):
+                return Classification(category, "subject+body", rule.name)
+        return Classification(rule.category, "subject", rule.name)
+
+    rule = _match(body[:_BODY_SCAN_CHARS])
+    if rule:
+        return Classification(rule.category, "body", rule.name)
+
+    if llm_fallback is None:
+        return Classification("unclassified", "none", None)
+
+    answer = llm_fallback(fence(f"SUBJECT: {subject}\nBODY: {body}", label="FILING"))
+    answer = (answer or "").strip()
+    if answer in CATEGORIES:
+        return Classification(answer, "model", None, model_called=True)
+    return Classification("unclassified", "model_rejected", None, model_called=True)

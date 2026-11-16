@@ -1,0 +1,52 @@
+{
+ "symbol": "DEMOCHEM",
+ "synthetic": true,
+ "_note": "SYNTHETIC offline demo company (DemoChem Specialty Ltd). Not a real issuer. Shaped exactly like a live screener.in + BSE-transcript bundle so the full Pull pipeline runs with no network and no API key.",
+ "source": "snapshot",
+ "fetched_at": "2026-11-15T00:00:00+00:00",
+ "financials": {
+  "unit": "INR_cr",
+  "source_url": null,
+  "quarters": [
+   {"period": "Jun 2024", "revenue": 400, "ebitda": 68, "other_income": 3, "interest": 6,  "depreciation": 14, "pbt": 51, "pat": 38},
+   {"period": "Sep 2024", "revenue": 425, "ebitda": 73, "other_income": 3, "interest": 6,  "depreciation": 14, "pbt": 56, "pat": 42},
+   {"period": "Dec 2024", "revenue": 410, "ebitda": 70, "other_income": 3, "interest": 6,  "depreciation": 14, "pbt": 53, "pat": 40},
+   {"period": "Mar 2025", "revenue": 445, "ebitda": 78, "other_income": 4, "interest": 6,  "depreciation": 15, "pbt": 61, "pat": 46},
+   {"period": "Jun 2025", "revenue": 430, "ebitda": 73, "other_income": 3, "interest": 7,  "depreciation": 15, "pbt": 54, "pat": 40},
+   {"period": "Sep 2025", "revenue": 452, "ebitda": 75, "other_income": 3, "interest": 7,  "depreciation": 16, "pbt": 55, "pat": 41},
+   {"period": "Dec 2025", "revenue": 468, "ebitda": 76, "other_income": 4, "interest": 8,  "depreciation": 16, "pbt": 56, "pat": 42},
+   {"period": "Mar 2026", "revenue": 505, "ebitda": 84, "other_income": 4, "interest": 8,  "depreciation": 17, "pbt": 63, "pat": 47},
+   {"period": "Jun 2026", "revenue": 476, "ebitda": 71, "other_income": 3, "interest": 9,  "depreciation": 18, "pbt": 47, "pat": 35},
+   {"period": "Sep 2026", "revenue": 489, "ebitda": 72, "other_income": 3, "interest": 10, "depreciation": 19, "pbt": 46, "pat": 34}
+  ],
+  "annual": [
+   {"period": "Mar 2022", "revenue": 1320, "ebitda": 238, "other_income": 10, "interest": 15, "depreciation": 43, "pbt": 190, "pat": 142,
+    "equity": 900,  "borrowings": 180, "cash": 120, "receivables": 250, "inventory": 210, "payables": 150, "cfo": 170, "capex": 90},
+   {"period": "Mar 2023", "revenue": 1480, "ebitda": 262, "other_income": 11, "interest": 18, "depreciation": 50, "pbt": 205, "pat": 153,
+    "equity": 1030, "borrowings": 210, "cash": 110, "receivables": 290, "inventory": 240, "payables": 165, "cfo": 160, "capex": 120},
+   {"period": "Mar 2024", "revenue": 1590, "ebitda": 280, "other_income": 12, "interest": 21, "depreciation": 57, "pbt": 214, "pat": 160,
+    "equity": 1165, "borrowings": 260, "cash": 90,  "receivables": 330, "inventory": 260, "payables": 175, "cfo": 150, "capex": 180},
+   {"period": "Mar 2025", "revenue": 1680, "ebitda": 289, "other_income": 13, "interest": 24, "depreciation": 57, "pbt": 221, "pat": 166,
+    "equity": 1300, "borrowings": 380, "cash": 70,  "receivables": 380, "inventory": 300, "payables": 190, "cfo": 120, "capex": 260},
+   {"period": "Mar 2026", "revenue": 1855, "ebitda": 308, "other_income": 14, "interest": 30, "depreciation": 64, "pbt": 228, "pat": 170,
+    "equity": 1440, "borrowings": 520, "cash": 60,  "receivables": 450, "inventory": 340, "payables": 205, "cfo": 105, "capex": 290}
+  ]
+ },
+ "transcripts": [
+  {"call": "Q3 FY26", "call_date": "2026-01-28", "url": null, "pages": [
+   "Good evening everyone, and welcome to the DemoChem Specialty Ltd. Q3 FY26 earnings conference call. Revenue for the quarter was Rs. 468 crore, up 14.1% year-on-year. EBITDA margin for the quarter was 16.2%.",
+   "Anil Mehta (CFO): For FY26 we continue to guide for revenue growth of 12-14% with EBITDA margins of around 18%. Our capex for FY26 will be approximately ₹250 crore, largely towards the new fluorination block at Dahej. Priya Nair (Analyst, Alpha Capital): Is the 18% margin target achievable given raw material pressure? Anil Mehta (CFO): Yes, we expect raw material costs to ease by Q1 FY27."
+  ]},
+  {"call": "Q4 FY26", "call_date": "2026-05-12", "url": null, "pages": [
+   "Rajiv Desai (MD): Revenue for FY26 grew 10.4% to ₹1,855 crore. EBITDA margin for the year was 16.6%. The Dahej block was commissioned in March.",
+   "Rajiv Desai (MD): Looking ahead, we are guiding for revenue growth of 15-18% in FY27 as the Dahej block ramps up. We expect EBITDA margins to recover to 18-19% this year. FY27 capex is planned at ₹200 crore. Karan Shah (Analyst, Gamma AMC): Will the 15-18% growth come mostly from volumes?"
+  ]},
+  {"call": "Q1 FY27", "call_date": "2026-08-06", "url": null, "pages": [
+   "Rajiv Desai (MD): Revenue for the quarter grew 10.7% year-on-year. We remain confident of 15-18% revenue growth for FY27. However, given input cost inflation, we now expect EBITDA margin of about 17% for FY27."
+  ]},
+  {"call": "Q2 FY27", "call_date": "2026-11-08", "url": null, "pages": [
+   "Rajiv Desai (MD): Revenue grew 8.2% year-on-year to ₹489 crore. Given softer agrochemical demand, we are revising our FY27 revenue growth guidance to 12-14%.",
+   "Anil Mehta (CFO): We now expect EBITDA margin in the range of 16 to 17% for FY27. Mehul Shah (Analyst, Beta Securities): What PAT growth do you expect for FY27? Anil Mehta (CFO): We expect PAT growth of 10% for FY27, aided by lower interest costs in H2."
+  ]}
+ ]
+}

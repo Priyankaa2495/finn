@@ -1,0 +1,259 @@
+{
+ "dev": {
+  "n": 95,
+  "covered": 95,
+  "correct": 93,
+  "correct_covered": 93,
+  "model_calls": 0,
+  "buried": [],
+  "noise": [
+   {
+    "id": "NSE:106847413",
+    "symbol": "BHARTIARTL",
+    "subject": "Updates",
+    "gold": "unclassified",
+    "pred": "results",
+    "rule": "results",
+    "source": "body"
+   }
+  ],
+  "misses": [
+   {
+    "id": "NSE:106847413",
+    "symbol": "BHARTIARTL",
+    "subject": "Updates",
+    "gold": "unclassified",
+    "pred": "results",
+    "rule": "results",
+    "source": "body"
+   },
+   {
+    "id": "NSE:106848049",
+    "symbol": "TITAN",
+    "subject": "General Updates",
+    "gold": "unclassified",
+    "pred": "press_release",
+    "rule": "opaque_update",
+    "source": "subject"
+   }
+  ],
+  "uncovered": [],
+  "coverage": 1.0,
+  "precision": 0.9789473684210527,
+  "n_unambiguous": 88,
+  "precision_unambiguous": 0.9886363636363636,
+  "accuracy": 0.9789473684210527,
+  "material": 27,
+  "confusion": [
+   {
+    "gold": "unclassified",
+    "pred": "results",
+    "count": 1
+   },
+   {
+    "gold": "unclassified",
+    "pred": "press_release",
+    "count": 1
+   }
+  ]
+ },
+ "holdout": {
+  "n": 108,
+  "covered": 108,
+  "correct": 105,
+  "correct_covered": 105,
+  "model_calls": 0,
+  "buried": [],
+  "noise": [
+   {
+    "id": "NSE:106829496",
+    "symbol": "HDFCBANK",
+    "subject": "General Updates",
+    "gold": "press_release",
+    "pred": "management_change",
+    "rule": "management_change",
+    "source": "body"
+   },
+   {
+    "id": "NSE:106831152",
+    "symbol": "RELIANCE",
+    "subject": "General Updates",
+    "gold": "press_release",
+    "pred": "results",
+    "rule": "results",
+    "source": "body"
+   }
+  ],
+  "misses": [
+   {
+    "id": "NSE:106827783",
+    "symbol": "RELIANCE",
+    "subject": "General Updates",
+    "gold": "M&A",
+    "pred": "fund_raise",
+    "rule": "fund_raise",
+    "source": "body"
+   },
+   {
+    "id": "NSE:106829496",
+    "symbol": "HDFCBANK",
+    "subject": "General Updates",
+    "gold": "press_release",
+    "pred": "management_change",
+    "rule": "management_change",
+    "source": "body"
+   },
+   {
+    "id": "NSE:106831152",
+    "symbol": "RELIANCE",
+    "subject": "General Updates",
+    "gold": "press_release",
+    "pred": "results",
+    "rule": "results",
+    "source": "body"
+   }
+  ],
+  "uncovered": [],
+  "coverage": 1.0,
+  "precision": 0.9722222222222222,
+  "n_unambiguous": 98,
+  "precision_unambiguous": 1.0,
+  "accuracy": 0.9722222222222222,
+  "material": 43,
+  "confusion": [
+   {
+    "gold": "M&A",
+    "pred": "fund_raise",
+    "count": 1
+   },
+   {
+    "gold": "press_release",
+    "pred": "management_change",
+    "count": 1
+   },
+   {
+    "gold": "press_release",
+    "pred": "results",
+    "count": 1
+   }
+  ]
+ },
+ "fresh": {
+  "n": 76,
+  "covered": 76,
+  "correct": 70,
+  "correct_covered": 70,
+  "model_calls": 0,
+  "buried": [
+   {
+    "id": "NSE:106816002",
+    "symbol": "POLYCAB",
+    "subject": "Press Release",
+    "gold": "litigation",
+    "pred": "press_release",
+    "rule": "press_release",
+    "source": "subject"
+   },
+   {
+    "id": "NSE:106818462",
+    "symbol": "POLYCAB",
+    "subject": "Press Release",
+    "gold": "results",
+    "pred": "press_release",
+    "rule": "press_release",
+    "source": "subject"
+   }
+  ],
+  "noise": [],
+  "misses": [
+   {
+    "id": "NSE:106808824",
+    "symbol": "ASIANPAINT",
+    "subject": "Updates",
+    "gold": "results",
+    "pred": "dividend",
+    "rule": "dividend",
+    "source": "body"
+   },
+   {
+    "id": "NSE:106808892",
+    "symbol": "ASIANPAINT",
+    "subject": "Analysts/Institutional Investor Meet/Con. Call Updates",
+    "gold": "earnings_call",
+    "pred": "investor_meetings",
+    "rule": "analyst_meet",
+    "source": "subject"
+   },
+   {
+    "id": "NSE:106816002",
+    "symbol": "POLYCAB",
+    "subject": "Press Release",
+    "gold": "litigation",
+    "pred": "press_release",
+    "rule": "press_release",
+    "source": "subject"
+   },
+   {
+    "id": "NSE:106817653",
+    "symbol": "RELIANCE",
+    "subject": "General Updates",
+    "gold": "M&A",
+    "pred": "fund_raise",
+    "rule": "fund_raise",
+    "source": "body"
+   },
+   {
+    "id": "NSE:106817804",
+    "symbol": "RELIANCE",
+    "subject": "General Updates",
+    "gold": "M&A",
+    "pred": "fund_raise",
+    "rule": "fund_raise",
+    "source": "body"
+   },
+   {
+    "id": "NSE:106818462",
+    "symbol": "POLYCAB",
+    "subject": "Press Release",
+    "gold": "results",
+    "pred": "press_release",
+    "rule": "press_release",
+    "source": "subject"
+   }
+  ],
+  "uncovered": [],
+  "coverage": 1.0,
+  "precision": 0.9210526315789473,
+  "n_unambiguous": 65,
+  "precision_unambiguous": 0.9846153846153847,
+  "accuracy": 0.9210526315789473,
+  "material": 28,
+  "confusion": [
+   {
+    "gold": "M&A",
+    "pred": "fund_raise",
+    "count": 2
+   },
+   {
+    "gold": "results",
+    "pred": "dividend",
+    "count": 1
+   },
+   {
+    "gold": "earnings_call",
+    "pred": "investor_meetings",
+    "count": 1
+   },
+   {
+    "gold": "litigation",
+    "pred": "press_release",
+    "count": 1
+   },
+   {
+    "gold": "results",
+    "pred": "press_release",
+    "count": 1
+   }
+  ]
+ }
+}

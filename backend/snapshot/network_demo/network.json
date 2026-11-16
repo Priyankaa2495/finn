@@ -1,0 +1,79 @@
+{
+ "_note": "SYNTHETIC demo network. All people are fictional; employers are real listed/unlisted companies used only to exercise matching. A real investor network lives in data/network_private/ (gitignored) and never enters the repo.",
+ "people": [
+  {"id": "c01", "name": "Priya Raman", "source": "synthetic", "closeness": 4, "last_contacted": "2026-02-10",
+   "stints": [
+    {"org": "Dixon Technologies (India) Ltd", "title": "VP Operations", "start": "2016-03", "end": "2022-06"},
+    {"org": "Tata Electronics Pvt Ltd", "title": "Head of Operations", "start": "2022-07", "end": null}],
+   "education": [{"school": "IIT Madras", "start": 2004, "end": 2008}],
+   "expertise": ["electronics manufacturing", "semiconductors"]},
+
+  {"id": "c02", "name": "Arjun Mehta", "source": "synthetic", "closeness": 3, "last_contacted": "2026-09-20",
+   "stints": [
+    {"org": "Amber Enterprises India Ltd", "title": "Finance Manager", "start": "2015-01", "end": "2021-03"},
+    {"org": "Kaynes Technology India Ltd", "title": "Head of Strategy", "start": "2021-04", "end": null}],
+   "education": [{"school": "IIM Ahmedabad", "start": 2010, "end": 2012}],
+   "expertise": ["electronics manufacturing"]},
+
+  {"id": "c03", "name": "Neha Kulkarni", "source": "synthetic", "closeness": 4, "last_contacted": "2025-06-01",
+   "stints": [
+    {"org": "Deepak Nitrite Limited", "title": "Head of R&D", "start": "2012-01", "end": "2019-12"},
+    {"org": "Kulkarni Advisory LLP", "title": "Founder", "start": "2020-01", "end": null}],
+   "education": [{"school": "ICT Mumbai", "start": 2003, "end": 2007}],
+   "expertise": ["specialty chemicals", "fluorochemicals"]},
+
+  {"id": "c04", "name": "Rahul Iyer", "source": "synthetic", "closeness": 3, "last_contacted": "2026-08-01",
+   "stints": [
+    {"org": "Cholamandalam Investment and Finance Company Ltd", "title": "Regional Credit Head", "start": "2013-04", "end": "2020-03"},
+    {"org": "Mahindra Finance", "title": "VP Rural Credit", "start": "2020-04", "end": "2024-02"},
+    {"org": "GramCredit Pvt Ltd", "title": "COO", "start": "2024-03", "end": null}],
+   "expertise": ["rural lending", "vehicle finance"]},
+
+  {"id": "c05", "name": "Kavita Shah", "source": "synthetic", "closeness": 5, "last_contacted": "2026-10-30",
+   "stints": [
+    {"org": "McKinsey & Company", "title": "Engagement Manager", "start": "2010-06", "end": "2016-05"},
+    {"org": "Titan Company Ltd", "title": "Strategy Director", "start": "2016-06", "end": "2021-08"},
+    {"org": "Havells India Limited", "title": "Chief Marketing Officer", "start": "2021-09", "end": null}],
+   "education": [{"school": "IIM Ahmedabad", "start": 2008, "end": 2010}],
+   "expertise": ["consumer brands", "retail"]},
+
+  {"id": "c06", "name": "Vikram Sethi", "source": "synthetic", "closeness": 2, "last_contacted": "2024-12-01",
+   "stints": [
+    {"org": "Infosys Ltd", "title": "Senior Architect", "start": "2008-07", "end": "2015-06"},
+    {"org": "Micron Technology India", "title": "Director, Design", "start": "2019-01", "end": null}],
+   "education": [{"school": "IIT Bombay", "start": 2002, "end": 2006}],
+   "expertise": ["semiconductors"]},
+
+  {"id": "c07", "name": "Ananya Rao", "source": "synthetic", "closeness": 3, "last_contacted": "2025-11-01",
+   "stints": [
+    {"org": "Polycab India Ltd", "title": "National Sales Head", "start": "2017-01", "end": "2023-05"},
+    {"org": "KEI Industries Ltd", "title": "VP Sales", "start": "2023-06", "end": null}],
+   "expertise": ["cables and wires", "infrastructure"]},
+
+  {"id": "c08", "name": "Sameer Joshi", "source": "synthetic", "closeness": 2, "last_contacted": "2026-03-15",
+   "stints": [
+    {"org": "PI Industries Ltd", "title": "Business Head, Exports", "start": "2014-01", "end": "2021-06"},
+    {"org": "UPL Ltd", "title": "Regional Director", "start": "2021-07", "end": null}],
+   "expertise": ["agrochemicals"]},
+
+  {"id": "c09", "name": "Farah Khan", "source": "synthetic", "closeness": 3, "last_contacted": "2026-05-05",
+   "stints": [
+    {"org": "Zomato Ltd", "title": "Director, Supply", "start": "2018-02", "end": "2023-09"}],
+   "expertise": ["consumer internet", "quick commerce"]},
+
+  {"id": "c10", "name": "Deepak Menon", "source": "synthetic", "closeness": 3, "last_contacted": "2025-01-01",
+   "stints": [
+    {"org": "Sun Pharmaceutical Industries Ltd", "title": "Head, Regulatory Affairs", "start": "2011-01", "end": "2020-12"}],
+   "expertise": ["pharma regulatory", "usfda compliance"]},
+
+  {"id": "p01", "name": "Rohit Bansal", "source": "synthetic", "is_contact": false,
+   "stints": [
+    {"org": "Amber Enterprises India", "title": "Deputy CFO", "start": "2016-01", "end": "2021-06"},
+    {"org": "Syrma SGS Technology Ltd", "title": "CFO", "start": "2021-07", "end": "2026-10"}],
+   "education": [{"school": "IIM Ahmedabad", "start": 2010, "end": 2012}]},
+
+  {"id": "p02", "name": "Sunil Gupta", "source": "synthetic", "is_contact": false, "knows": ["c03"],
+   "stints": [
+    {"org": "Deepak Nitrite Ltd", "title": "Executive Director", "start": "2010-01", "end": null}]}
+ ]
+}

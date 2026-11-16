@@ -1,228 +1,185 @@
-"""FINN API + static frontend, one process.
+"""FINN API + static UI in one FastAPI app.
 
-The web tier is read-mostly: it serves what the scheduled refresh job wrote, and only
-does live work for on-demand research (cached per symbol per day)."""
+Run (single worker by decision; the per-symbol fetch lock is per process):
+    uvicorn app.main:create_app --factory --host 0.0.0.0 --port $PORT --workers 1
+
+Access (decision 2026-11-15: token-gated, frictionless for reviewers):
+- FINN_ACCESS_TOKEN set (deployed): open `/?key=TOKEN` once. The key is checked in constant
+  time, an httpOnly SameSite=Lax cookie `finn_key` is set, and a 303 redirect to `/` strips the
+  key from the address bar (so it never sits in history, screenshots or Referer). The cookie
+  holds an HMAC of the token, not the token. Every /api route except /api/health then needs
+  that cookie (or `Authorization: Bearer <token>` for scripts). Imports persist (0600 file).
+- FINN_ACCESS_TOKEN unset (local dev): open; LinkedIn imports are analysed in memory only.
+"""
+from __future__ import annotations
+
+import copy
 import hmac
-import json
-import logging
-from datetime import datetime
+import os
+import re
+from datetime import date
+from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
-from . import ask, db, demo, llm, snapshot
-from .config import ACCESS_TOKEN, DATA_DIR, DEMO_MODE, FRONTEND_DIR, LLM_ENABLED, LLM_DEEP_MODEL, LLM_FAST_MODEL
-from .intel import alerts, digest
-from .network import graph, store
-from .network.resolve import org_index
-from .research import engine
+from . import config, db, refresh
+from .intel import alerts as A
+from .intel.brief import build_brief, network_overview
+from .llm import LLMClient
+from .network import resolve
+from .network.graph import NetworkGraph
+from .network.store import DEFAULT_PATH, MAX_CSV_BYTES, ImportTooLarge, NetworkStore
+from .research.engine import ResearchEngine
 
-logging.basicConfig(level=logging.INFO)
-app = FastAPI(title="FINN", docs_url="/api/docs")
-PORTFOLIO = json.loads((DATA_DIR / "portfolio.json").read_text(encoding="utf-8"))
-HOLDINGS = PORTFOLIO["holdings"]
-
-
-def bootstrap():
-    db.init()
-    with db.conn() as c:
-        has_prices = c.execute("SELECT COUNT(*) n FROM prices").fetchone()["n"] > 0
-    if not has_prices and not snapshot.load():
-        demo.synthetic_prices([h["symbol"] for h in HOLDINGS])
-    demo.demochem()
-    with db.conn() as c:
-        live = c.execute("SELECT COUNT(*) n, MAX(ts) m FROM filings WHERE demo=0").fetchone()
-    if DEMO_MODE:
-        anchor = datetime.fromisoformat(live["m"]) if live["m"] else None
-        demo.seed_filings(include_routine=live["n"] == 0, anchor=anchor)
-        demo.sample_results_fundamentals("POLYCAB")
+FRONTEND_DIR = config.BACKEND_DIR.parent / "frontend"
+SYMBOL_RE = re.compile(r"^[A-Z0-9&-]{1,20}$")
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+       "media-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+SESSION_COOKIE = "finn_key"
+SESSION_MAX_AGE = 30 * 24 * 3600
 
 
-bootstrap()
+def session_value(token: str) -> str:
+    """What the cookie carries: an HMAC of the token, so a leaked cookie isn't the key itself."""
+    return hmac.new(token.encode(), b"finn-session-v1", "sha256").hexdigest()
 
 
-@app.middleware("http")
-async def gate(request: Request, call_next):
-    """Shared-secret gate: the network is personal data, so even the prototype isn't open.
-    Visit /?key=<token> once; it's stored as an httpOnly cookie."""
-    path = request.url.path
-    if ACCESS_TOKEN and path.startswith("/api") and path != "/api/health":
-        tok = request.headers.get("x-finn-key") or request.cookies.get("finn_key") or ""
-        if not hmac.compare_digest(tok.encode(), ACCESS_TOKEN.encode()):  # constant-time
-            return _harden(JSONResponse({"error": "locked"}, status_code=401), api=True)
-    k = request.query_params.get("key")
-    if ACCESS_TOKEN and k and hmac.compare_digest(k.encode(), ACCESS_TOKEN.encode()) and not path.startswith("/api"):
-        # Swap the key for a cookie and drop it from the URL, so it doesn't sit in the
-        # address bar, browser history, screenshots or a Referer header.
-        resp = RedirectResponse(path, status_code=303)
-        resp.set_cookie("finn_key", k, httponly=True, samesite="lax", secure=request.url.scheme == "https",
-                        max_age=60 * 60 * 24 * 30)
-        return _harden(resp)
-    return _harden(await call_next(request), api=path.startswith("/api"))
-
-
-def _harden(resp, api=False):
-    resp.headers["Referrer-Policy"] = "no-referrer"
+def _security_headers(resp, path: str):
+    resp.headers["Content-Security-Policy"] = CSP
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
-    if api:  # responses carry personal network data: never store in shared caches
-        resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Permissions-Policy"] = "microphone=(self), camera=(), geolocation=()"
+    # API responses can carry personal network data: never cached anywhere.
+    resp.headers["Cache-Control"] = "no-store" if path.startswith("/api/") or path == "/" else "no-cache"
     return resp
 
 
-def settings():
-    return {**alerts.DEFAULTS, **db.kv_get("settings", {})}
+def create_app(conn=None, store: NetworkStore | None = None, engine: ResearchEngine | None = None,
+               llm: LLMClient | None = None, *, frontend_dir: Path = FRONTEND_DIR,
+               access_token: str | None = None, private_path: Path = DEFAULT_PATH,
+               seed: bool = True, include_demo: bool = True) -> FastAPI:
+    token = access_token if access_token is not None else (os.getenv("FINN_ACCESS_TOKEN") or None)
+    conn = conn if conn is not None else db.connect()
+    if seed:
+        refresh.seed_from_snapshot(conn)
+    llm = llm if llm is not None else LLMClient(conn=conn)
+    engine = engine if engine is not None else ResearchEngine(llm)
+    if store is None:
+        store = NetworkStore.load(private_path) if Path(private_path).exists() else NetworkStore.load_demo()
 
+    app = FastAPI(title="FINN", docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.store = store
 
-@app.get("/api/health")
-def health():
-    """Unauthenticated liveness probe for the host (reveals nothing)."""
-    return {"ok": True}
+    def graph() -> NetworkGraph:
+        return NetworkGraph(app.state.store, today=date.today())
 
+    # ------------------------------------------------------------ middleware
+    def authorised(request: Request) -> bool:
+        cookie = request.cookies.get(SESSION_COOKIE, "")
+        if cookie and hmac.compare_digest(cookie, session_value(token)):
+            return True
+        return hmac.compare_digest(request.headers.get("authorization", ""), f"Bearer {token}")
 
-@app.get("/api/meta")
-def meta():
-    with db.conn() as c:
-        n_live = c.execute("SELECT COUNT(*) n FROM filings WHERE demo=0").fetchone()["n"]
-    return {"portfolio": PORTFOLIO, "settings": settings(),
-            "data": {"live_filings": n_live, "prices_synthetic": db.kv_get("prices_synthetic", False),
-                     "demo_mode": DEMO_MODE},
-            "llm": {"enabled": LLM_ENABLED, "fast": LLM_FAST_MODEL, "deep": LLM_DEEP_MODEL, **llm.STATS},
-            "themes": graph.all_themes()}
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        path = request.url.path
+        if token and "key" in request.query_params:
+            # Key-to-cookie: verify, set the session cookie, 303 to a clean URL. Applies to any
+            # path so a key pasted onto a deep link is stripped too.
+            supplied = request.query_params.get("key", "")
+            if not hmac.compare_digest(supplied, token):
+                return _security_headers(PlainTextResponse("Invalid access key.", status_code=401), "/api/")
+            resp = RedirectResponse("/", status_code=303)
+            https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+            resp.set_cookie(SESSION_COOKIE, session_value(token), max_age=SESSION_MAX_AGE, path="/",
+                            httponly=True, samesite="lax", secure=https)
+            return _security_headers(resp, "/api/")
+        if token and path.startswith("/api/") and path != "/api/health" and not authorised(request):
+            return _security_headers(JSONResponse({"detail": "unauthorized"}, status_code=401), path)
+        return _security_headers(await call_next(request), path)
 
+    # ------------------------------------------------------------- endpoints
+    @app.get("/api/health")
+    def health():
+        return {"ok": True}
 
-@app.get("/api/brief")
-def brief(hours: int = 24):
-    return digest.build(HOLDINGS, hours=max(1, min(hours, 24 * 30)), settings=settings())
+    @app.get("/api/brief")
+    def brief(window: int = Query(24, ge=1, le=168), price: float = Query(5.0, ge=0.5, le=50),
+              volume: float = Query(2.0, ge=1.1, le=20), demo: bool = True):
+        cfg = A.AlertConfig(price_move_pct=price, volume_multiple=volume)
+        return build_brief(conn, graph(), window_hours=window, alert_cfg=cfg, include_demo=demo and include_demo)
 
+    @app.get("/api/resolve")
+    def resolve_query(q: str = Query(..., min_length=1, max_length=60)):
+        cleaned = " ".join(q.split())
+        if SYMBOL_RE.fullmatch(cleaned.upper().replace(" ", "")) and " " not in cleaned:
+            m = resolve.resolve_org_or_ticker(cleaned)
+            return {"symbol": cleaned.upper(), "name": m.org.name if m.org else None}
+        m = resolve.resolve_org(cleaned)
+        if m.org and m.org.ticker:
+            return {"symbol": m.org.ticker, "name": m.org.name}
+        return {"symbol": None, "name": None}
 
-class Settings(BaseModel):
-    price_move_pct: float | None = None
-    volume_multiple: float | None = None
-    lookback: int | None = None
-    care_about: list[str] | None = None
-    muted: list[str] | None = None
+    @app.get("/api/research/{symbol}")
+    async def research(symbol: str):
+        sym = symbol.strip().upper()
+        if not SYMBOL_RE.fullmatch(sym):           # before any I/O: no odd input reaches screener
+            raise HTTPException(400, "Symbol must be 1-20 characters: A-Z, 0-9, & or -")
+        try:
+            report = await engine.research(sym)
+        except LookupError:
+            raise HTTPException(404, f"{sym} not found on screener.in")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception:
+            raise HTTPException(502, "Primary sources are unreachable right now. Try again shortly.")
+        report["network"] = [{"person": s.name, "score": s.score, "why": list(s.reasons[:2]),
+                              "insider": s.insider.__dict__} for s in graph().who_to_call(sym, top=3)]
+        return report
 
+    @app.get("/api/network/overview")
+    def overview():
+        return network_overview(conn, graph(), include_demo=include_demo)
 
-@app.put("/api/settings")
-def put_settings(s: Settings):
-    cur = db.kv_get("settings", {})
-    cur.update({k: v for k, v in s.model_dump().items() if v is not None})
-    db.kv_set("settings", cur)
-    return settings()
+    @app.post("/api/network/import")
+    async def import_csv(file: UploadFile = File(...)):
+        data = await file.read(MAX_CSV_BYTES + 1)
+        if len(data) > MAX_CSV_BYTES:
+            raise HTTPException(413, "File exceeds the 5 MB limit")
+        target = app.state.store if token else NetworkStore(copy.deepcopy(list(app.state.store.people.values())))
+        try:
+            report = target.import_linkedin_csv(data)
+        except ImportTooLarge:
+            raise HTTPException(413, "File exceeds the 5 MB limit")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        if token:
+            target.save(private_path)
+        g = NetworkGraph(target, today=date.today())
+        return {"report": report.__dict__, "persisted": bool(token),
+                "note": ("Saved to your private network store." if token else
+                         "Demo mode: analysed in memory for this response only. Nothing was stored."),
+                "overview": network_overview(conn, g, include_demo=include_demo)}
 
+    @app.get("/api/meta")
+    def meta():
+        with db.LOCK:
+            filings = conn.execute("SELECT COUNT(*) c, MAX(filed_at) m FROM filings").fetchone()
+            enriched = conn.execute("SELECT kind, COUNT(*) c FROM enrichment GROUP BY kind").fetchall()
+            cache_rows = conn.execute("SELECT COUNT(*) c FROM llm_cache").fetchone()["c"]
+        cached = sorted(p.stem for p in Path(engine.cache_dir).glob("*.json")) if Path(engine.cache_dir).exists() else []
+        snap = sorted(p.stem for p in Path(engine.snapshot_dir).glob("*.json"))
+        m = llm.meta()
+        return {"mode": "llm" if m["enabled"] else "zero-key", "access": "private" if token else "public-demo",
+                "llm": m, "deep_fallbacks": m["totals"].get("deep_fallbacks", 0),
+                "llm_cache_rows": cache_rows,
+                "research": {"live_fetches": engine.live_fetches, "cached_tickers": cached, "snapshot_tickers": snap},
+                "data": {"filings": filings["c"], "as_of": filings["m"],
+                         "enriched": {r["kind"]: r["c"] for r in enriched}}}
 
-@app.get("/api/research/{symbol}")
-def research(symbol: str):
-    return engine.research(symbol)
-
-
-@app.get("/api/prices/{symbol}")
-def prices(symbol: str):
-    from .ingest import prices as p
-    return p.series(symbol.upper(), 60)
-
-
-@app.get("/api/network/call")
-def call(org: str = "", symbol: str = ""):
-    oid = org or org_index().by_ticker.get(symbol.upper())
-    if not oid:
-        raise HTTPException(404, "unknown company")
-    return {"org": org_index().get(oid), "people": graph.who_to_call(oid, limit=5)}
-
-
-@app.get("/api/network/expertise")
-def expertise(theme: str):
-    return {"theme": theme, "people": graph.expertise(theme)}
-
-
-@app.get("/api/network/coverage")
-def coverage():
-    return graph.coverage(HOLDINGS)
-
-
-@app.get("/api/network/person/{pid}")
-def person(pid: str):
-    try:
-        return graph.person(pid)
-    except StopIteration:
-        raise HTTPException(404)
-
-
-@app.get("/api/network/overview")
-def overview():
-    net = store.load()
-    b = digest.build(HOLDINGS, hours=72, settings=settings())
-    return {"size": len(net["people"]), "second_degree": len(net.get("second_degree", [])),
-            "coverage": graph.coverage(HOLDINGS), "warmups": b["warmups"],
-            "themes": graph.all_themes()}
-
-
-@app.post("/api/network/import")
-async def import_csv(file: UploadFile = File(...)):
-    raw = await file.read(MAX_IMPORT_BYTES + 1)
-    if len(raw) > MAX_IMPORT_BYTES:  # a 30k-connection export is ~3 MB; anything bigger isn't one
-        raise HTTPException(413, f"File too large (max {MAX_IMPORT_BYTES // 1_000_000} MB)")
-    text = raw.decode("utf-8-sig", errors="ignore")  # LinkedIn exports carry a BOM
-    if "First Name" not in text[:5000]:
-        raise HTTPException(400, "This doesn't look like LinkedIn's Connections.csv (no 'First Name' header).")
-    return store.import_linkedin_csv(text)
-
-
-MAX_IMPORT_BYTES = 5_000_000
-
-
-class Ask(BaseModel):
-    q: str
-
-
-@app.post("/api/ask")
-def ask_(a: Ask):
-    b = digest.build(HOLDINGS, hours=72, settings=settings())
-    recent = [c["person"]["profile"] for c in b["act"] + b["know"] if c.get("person")]
-    r = ask.route(a.q, recent)
-    i = r["intent"]
-    if i == "research":
-        return {**r, "data": engine.research(r["symbol"])}
-    if i == "who_to_call":
-        return {**r, "data": {"org": org_index().get(r["org"]), "people": graph.who_to_call(r["org"], limit=5)}}
-    if i == "expertise":
-        return {**r, "data": {"theme": r["theme"], "people": graph.expertise(r["theme"])}}
-    if i == "coverage":
-        return {**r, "data": graph.coverage(HOLDINGS)}
-    if i == "person":
-        return {**r, "data": graph.person(r["id"])}
-    if i == "diligence":
-        return {**r, "data": {"name": r["person"]["name"], **graph.diligence(r["person"])}}
-    return r
-
-
-class Draft(BaseModel):
-    person_id: str
-    reason: str
-
-
-@app.post("/api/draft")
-def draft(d: Draft):
-    """Reconnect note. Only the first name and the public reason go to the model —
-    never the relationship notes or contact history."""
-    p = graph.person(d.person_id)
-    first = p["name"].split()[0]
-    out = None
-    if LLM_ENABLED:
-        out = llm.complete(f"Write a warm, brief WhatsApp message (max 45 words) from an investor to {first}, "
-                           f"an old contact, to reconnect. Hook: {d.reason}. Suggest a short call. No emojis, "
-                           "no flattery, sound like a person.", tier="fast", want_json=False)
-    return {"text": (out or f"Hi {first}, it's been a while! Saw the news — {d.reason.split(' — ')[0]}. "
-                            "Would love your take when you have 15 minutes this week. Coffee or a call?").strip()}
-
-
-# ---- frontend -----------------------------------------------------------------
-app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
-
-
-@app.get("/")
-def index():
-    return FileResponse(FRONTEND_DIR / "index.html")
+    if Path(frontend_dir).exists():
+        app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="ui")
+    return app

@@ -1,76 +1,103 @@
-# FINN — a financial investment agent that tells you what matters and who to call
+# FINN: Financial Investment Agent
 
-FINN is a mobile-first prototype for a public-markets investor. It has three layers:
+A mobile-first agent for an Indian-equities investor. **Push**: what changed in the portfolio and
+why it matters. **Pull**: did management deliver what they promised. **Network**: who you know
+who can explain it. Rules-first: every workflow runs with no API key; a model is an upgrade.
 
-- **Brief (Push).** Every filing across the portfolio in a window you choose, ranked by materiality. Routine paperwork is folded away. The few items that matter come with the next useful thing: the new CFO's career and your way to them, results numbers with QoQ/YoY, or the person best placed to explain an M&A or litigation event. End-of-day price and volume alerts fire on thresholds you set.
-- **Ask (Pull).** Research on any NSE symbol, grounded only in primary sources. The headline section is *Did management deliver?*: guidance quoted from the last four concall transcripts, checked against reported quarters, with guidance drift (raised / maintained / cut) across calls.
-- **Network.** Your own contacts, matched against careers, filings and companies, all inside Push and Pull. It also answers direct questions: who should I call, who can introduce me, who are my go-to people for a theme, which holdings have nobody close, and who has a natural reason to hear from you today.
+## Try it
 
-Deeper docs: [Architecture & writeup](docs/ARCHITECTURE.md), [Deploying](docs/DEPLOY.md), [Build & verification log](docs/BUILD_LOG.md).
+| | |
+|---|---|
+| Deployed | `https://<app>.onrender.com/?key=<FINN_ACCESS_TOKEN>`. Open once; the key becomes an httpOnly cookie and is stripped from the URL. |
+| Local | `cd backend && python -m venv .venv && .venv/Scripts/pip install -r requirements-dev.txt` (POSIX: `.venv/bin/pip`) |
+| | `uvicorn app.main:create_app --factory --port 8000` → http://localhost:8000 (open mode, no key) |
+| Tests | `python -m pytest` (226 tests, offline, zero-key) |
+| Eval | `python scripts/eval_classify.py run -v` · `--baseline` scores the pre-tuning rules |
+| Refresh data | `python -m app.refresh --snapshot` (NSE + yfinance + eager PDF parsing → committed snapshot) |
 
-## Two minutes on a phone
+On a phone: open the link → browser menu → **Add to Home Screen** (manifest + 192/512/maskable icons).
+Tabs: **Brief** (ranked filings, alerts, read-aloud), **Ask** (any NSE ticker or company name, by
+voice or text), **Network** (who to call, second-degree paths, warm-ups, blind spots).
 
-1. **Brief.** Open the *Dixon: CFO appointed* card (Demo). It shows the new CFO's career from the filing's own SEBI profile and your route to them through the network.
-2. Tap **7d**. These are live NSE filings: Kaynes' M&A term sheet comes with someone in your network who works there, and HDFC Bank's director changes and Bajaj Finance's fund-raises sit above the routine pile. Kaynes' results card says plainly when the quarter isn't in the standardised table yet, rather than showing last quarter's numbers.
-3. The **sliders icon** sets what counts as an unusual move for you (±% on the day, × average volume). The **speaker icon** reads the Brief aloud in ranked order with who to call, for the commute.
-4. **Ask** (type, or tap the mic on phones that support it) any NSE symbol, including one we never picked (`ASIANPAINT` and `TATAPOWER` both work). The first look takes about 20 s, then it's cached. Start with *Did management deliver?*: verbatim concall quotes with page numbers, checked against reported quarters.
-5. Ask `who should I call about Polycab` or `specialty chemicals`, then open **Network** for blind spots and natural reasons to reconnect.
-
-Live versus synthetic: filings, prices and fundamentals are live (refreshed 15 Nov 2026). The five *Demo* cards and every person in the network are synthetic; see [Data honesty](#data-honesty).
-
-## Run it locally (2 minutes)
-
-```bash
-cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
-
-Open http://localhost:8000 and use your browser's mobile view (or your phone on the same Wi-Fi at `http://<laptop-ip>:8000`).
-
-With no data and no API key it starts in **offline mode**: simulated prices, a synthetic filing feed tagged *Demo*, and DEMOCHEM, a fictional company with full financials and concall transcripts for the research view.
-
-## Make it live
-
-```bash
-cd backend
-python -m scripts.refresh --export     # yfinance prices, NSE filings, screener.in fundamentals
-export GEMINI_API_KEY=...               # optional: free key from aistudio.google.com
-uvicorn app.main:app --port 8000
-```
-
-`--export` writes `backend/data/snapshot/*.json`. The deployed app rebuilds its database from this snapshot on boot. That matters because NSE blocks many cloud IPs, so the refresh runs somewhere NSE allows (your laptop or a scheduled job) and the web app only reads.
-
-## Tests
-
-```bash
-cd backend && python -m pytest -q
-```
-
-The tests cover the judgement calls that would quietly mislead an investor if they broke: classification, materiality tiers, entity resolution, path ranking, the insider-compliance flag, guidance parsing and results arithmetic. They all run without an LLM.
-
-`tests/test_api.py` adds deploy-level guards: the access gate (locked without the key, unlocked by the share link's cookie), an open `/api/health` for the host's probe, and a check that every third-party import is declared in `requirements.txt`. CI (`.github/workflows/tests.yml`) runs the suite on a clean install, then builds the Docker image and probes it with the access gate on.
-
-## Repository map
+## Architecture
 
 ```
-backend/app/
-  ingest/      prices.py (yfinance)  filings.py (NSE)  fundamentals.py (screener.in + PDFs)
-  intel/       classify.py  materiality.py  results.py  alerts.py  digest.py (Push orchestrator)
-  research/    metrics.py (deterministic)  guidance.py (narrative vs numbers)  engine.py (Pull)
-  network/     resolve.py (entity resolution)  graph.py (paths, who-to-call, expertise, warm-ups)  store.py
-  llm.py       two-tier router + content-addressed cache
-  ask.py       one input box -> intent
-  main.py      FastAPI, serves the frontend too
-backend/data/  portfolio.json  orgs.json (org graph)  network.json (SYNTHETIC people)  snapshot/
-backend/eval/  filings_dev.jsonl (34 live filings, hand-checked labels)
-backend/scripts/ refresh.py (daily job; --reclassify)  eval_classify.py (coverage / precision report)
-frontend/      index.html  styles.css  app.js   (no framework, no build step)
+NSE announcements ─┐                      ┌─ classify (regex rules) ─ materiality (additive, explained)
+yfinance EOD ──────┼─ daily refresh ─ SQLite ─ alerts (your thresholds)
+results/annexure PDFs (eager, 15 holdings) ┘   └─ results card (PDF → ₹ Cr, screener fallback) · bios
+                                                         │
+screener.in tables + BSE transcripts (lazy, any ticker) ─┴─ research: metrics in code → guidance
+     (per-symbol lock, 20 h cache)                          (model picks sentence IDs; Python checks
+                                                             every number) → verdicts → facts pack
+                                                             → bull/bear (must cite fact IDs)
+Investor network (local JSON, 0600) ── pure-Python graph ── woven into Brief cards, Ask, Network tab
+                                         (never imported by llm/research; enforced by tests)
+FastAPI (one worker) serves /api/* + the vanilla-JS UI, strict CSP, cookie auth, /api/health open
 ```
 
-## Data honesty
+## Hard rules → how they are enforced
 
-- **Real companies get only live, fetched data.** The only exception is the five clearly tagged *Demo* filings, which make sure the management-change, results and material-event flows can be shown on any day.
-- **The network is entirely synthetic.** Every person is fictional. A real deployment imports the investor's own LinkedIn data export (supported: Network → Import Connections.csv) plus their CRM notes.
-- **DEMOCHEM is fictional.** No invented management quotes are ever attributed to a real company.
+| Rule | Mechanism | Test |
+|---|---|---|
+| Zero-key operation | `LLMClient` returns `None` without a key; every caller has a rules path | `test_engine_offline_zero_key_no_network`, CI runs with no secret |
+| Network never reaches an LLM/API | network package imports no I/O or LLM module; research never imports network | `test_network_package_imports_no_io_or_llm_modules`, socket-blocked tests |
+| Arithmetic in code | `research/metrics.py`, `intel/results.py`; models only see a computed facts pack | `test_bull_bear_model_points_must_cite_facts_and_reuse_their_numbers` |
+| Verbatim quotes by ID | model returns `{id, metric, target}`; target numbers must appear *as quantities* in that sentence | `test_model_selects_ids_only_and_python_grounds_every_number` |
+| Third-party text fenced | `sanitize.fence` / `fence_lines` strip control/bidi chars and fence tokens | `test_prompt_is_fenced_and_ids_cannot_be_forged` |
+| Mobile-first, no build | vanilla HTML/CSS/JS, 44 px targets, checked at 375 px | `test_frontend_static_contract`, CI `node --check` |
+
+## Classifier evaluation (rules only, real NSE filings, 0 model calls)
+
+| Set | Window | n | Coverage | Precision | Precision (unambiguous rows) | Material buried |
+|---|---|---|---|---|---|---|
+| dev | 1–15 Nov 2026 | 95 | 100% | 97.9% | 98.9% | 0 / 27 |
+| holdout | 16 Oct–7 Nov | 108 | 100% | 97.2% | 100% | 0 / 43 |
+| **fresh** (never tuned on) | 1–15 Oct | 76 | 100% | **92.1%** | **98.5%** | **2 / 28** |
+
+Before tuning, holdout was 84.5% precision with 13/43 material filings buried. Rules were tuned
+once on holdout misses, so **fresh is the honest generalization number**; it is reported, not
+gated. CI gates dev + holdout at precision ≥ 95%, coverage ≥ 85%, zero buried. Gold labels were
+assigned blind by the building agent (not an independent annotator); judgement calls carry an
+`ambiguous` note in `backend/eval/*.jsonl` for audit.
+
+## Data, privacy, deployment
+
+- **Sources**: NSE announcements and attachments, screener.in tables, BSE-hosted transcripts,
+  yfinance EOD. Pull/research uses primary sources only. `DEMOCHEM` and the demo network are
+  **synthetic** and labelled as such in the UI.
+- **Network data**: name, employer stints, education, self-declared expertise, closeness. LinkedIn
+  CSV import drops emails and profile URLs, 5 MB cap. Stored owner-only (0600), gitignored.
+  Production: Postgres with row-level security and customer-managed KMS keys.
+- **Render (free plan)**: one Docker web service (`render.yaml`), single uvicorn worker, non-root
+  user. Disk is ephemeral: every boot seeds SQLite from the committed snapshot, and the research
+  cache and private-mode imports do not survive a restart. Production: Postgres, a cron worker for
+  the daily refresh, and `pg_advisory_xact_lock` instead of the in-process fetch lock.
+- **Models** (optional): fast `gemini-3.5-flash-lite` (sentence-ID selection), deep
+  `gemini-3.8-flash` (bull/bear) with a 25 s timeout → fast-tier fallback, 2 retries with
+  exponential backoff on 429/5xx, SHA-256 content-addressed cache. Overridable via env
+  (`.env.example`); any OpenAI-compatible endpoint works.
+
+## Repository
+
+```
+backend/app/        config, db, llm, main (API), refresh
+  ingest/           NSE filings, yfinance prices, screener.in + transcripts
+  intel/            classify, materiality, alerts, results cards & bios, brief, sanitize, eval metrics
+  research/         metrics (arithmetic), guidance (select-by-ID, drift, verdicts), engine
+  network/          resolve (orgs, people), store (local, import guard), graph (queries)
+backend/snapshot/   committed Brief snapshot, demo cards, DEMOCHEM, synthetic network
+backend/eval/       labelled dev / holdout / fresh sets, label script, frozen baseline rules, reports
+backend/scripts/    eval_classify.py, make_icons.py
+backend/tests/      test_core.py, test_api.py, test_eval.py
+frontend/           index.html, styles.css, app.js, manifest.json, icons
+Dockerfile · render.yaml · .github/workflows/tests.yml
+```
+
+## Known limits
+
+- Rules-mode guidance recall on real transcripts is low by design (precision first); the fast
+  model supplies recall.
+- Results PDFs: scanned or unusual layouts fall back to screener (labelled) or "Quarter not
+  tabulated yet"; a retry with layout-preserving extraction handles column-block PDFs.
+- Read-aloud and voice input depend on the browser's Web Speech support; mic denial is handled.
+- Model IDs above are configuration defaults and were not verified against the provider's catalogue.

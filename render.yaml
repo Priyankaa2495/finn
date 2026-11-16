@@ -1,14 +1,24 @@
+# Render Blueprint: one Docker web service. The free plan's disk is ephemeral, so the app
+# seeds its SQLite DB from the committed snapshot on every boot (zero-key, offline-safe).
 services:
   - type: web
     name: finn
     runtime: docker
     plan: free
-    healthCheckPath: /api/health
-    autoDeploy: true            # each snapshot commit from the refresh job redeploys
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health          # open endpoint: the probe never needs the token
+    autoDeploy: true
     envVars:
-      - key: GEMINI_API_KEY      # optional; FINN runs fully without it
+      - key: FINN_ACCESS_TOKEN            # reviewers open https://<app>.onrender.com/?key=<value>
+        sync: false                       # set once in the dashboard; a redeploy never changes it
+      - key: FINN_LLM_API_KEY             # optional; leave empty for rules-only (zero-key) mode
         sync: false
-      - key: FINN_ACCESS_TOKEN   # share the app as https://<app>.onrender.com/?key=<token>
-        sync: false
-      - key: FINN_DEMO
-        value: "1"
+      - key: FINN_LLM_FAST
+        value: gemini-3.5-flash-lite
+      - key: FINN_LLM_DEEP
+        value: gemini-3.8-flash
+      - key: FINN_LLM_DEEP_TIMEOUT_S
+        value: "25"
+      - key: FINN_LIVE_TTL_HOURS
+        value: "20"

@@ -1,34 +1,109 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#EDF0F3" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0F1520" media="(prefers-color-scheme: dark)">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>FINN</title>
-  <link rel="manifest" href="/static/manifest.json">
-  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111315" media="(prefers-color-scheme: dark)">
+<meta name="description" content="FINN: what changed in your portfolio, what management promised, and who you know.">
+<title>FINN</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="FINN">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="stylesheet" href="styles.css">
+<script src="app.js" defer></script>
 </head>
 <body>
-  <main id="app" class="wrap" aria-live="polite"></main>
-  <div class="scrim" id="scrim"></div>
-  <section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Details"></section>
-  <nav class="tabs" aria-label="Sections">
-    <div class="in">
-      <a href="#brief" data-tab="brief">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h10M4 18h7"/></svg>Brief</a>
-      <a href="#ask" data-tab="ask">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>Ask</a>
-      <a href="#network" data-tab="network">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.3 11 15.7 7M8.3 13l7.4 4"/></svg>Network</a>
+<header class="top">
+  <div class="brand">
+    <span class="logo">FINN</span>
+    <span id="asof" class="asof"></span>
+  </div>
+  <div class="top-actions">
+    <span id="mode" class="mode" hidden></span>
+    <button id="listen" class="icon-btn" type="button" aria-label="Listen to the Brief" aria-pressed="false" title="Listen to the Brief">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path class="spk" d="M4 9v6h4l5 4V5L8 9H4z"/><path class="wave" d="M16 8.5a4.5 4.5 0 0 1 0 7M18.5 6a8 8 0 0 1 0 12"/><path class="stop" d="M7 7h10v10H7z"/></svg>
+    </button>
+    <button id="open-settings" class="icon-btn" type="button" aria-label="Alert thresholds" title="Alert thresholds">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="main">
+  <section id="tab-brief" class="tab" aria-labelledby="t-brief">
+    <div class="seg" role="group" aria-label="Time window">
+      <button type="button" data-window="24" aria-pressed="true">24h</button>
+      <button type="button" data-window="72" aria-pressed="false">3 days</button>
+      <button type="button" data-window="168" aria-pressed="false">7 days</button>
     </div>
-  </nav>
-  <script src="/static/app.js" type="module"></script>
+    <div id="brief-body" aria-live="polite"></div>
+  </section>
+
+  <section id="tab-ask" class="tab" aria-labelledby="t-ask" hidden>
+    <form id="ask-form" class="search" role="search" autocomplete="off">
+      <label for="ask-input" class="sr">Ticker or company</label>
+      <input id="ask-input" name="q" type="search" inputmode="search" enterkeyhint="search"
+             placeholder="Ticker or company" maxlength="60" autocapitalize="characters" spellcheck="false">
+      <button type="button" id="mic" class="icon-btn" aria-label="Ask by voice" title="Ask by voice">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+      </button>
+      <button type="submit" class="go">Ask</button>
+    </form>
+    <p id="ask-msg" class="msg" role="status" aria-live="polite"></p>
+    <div id="ask-suggest" class="chips" aria-label="Suggestions"></div>
+    <div id="ask-body"></div>
+  </section>
+
+  <section id="tab-network" class="tab" aria-labelledby="t-network" hidden>
+    <div id="net-body"></div>
+    <form id="import-form" class="panel import">
+      <h2>Add your LinkedIn connections</h2>
+      <p class="fine">Upload <b>Connections.csv</b> (max 5 MB). Email addresses and profile URLs are dropped on arrival. Matching runs locally in Python; contacts never reach a language model.</p>
+      <label class="file">
+        <input id="import-file" type="file" accept=".csv,text/csv" required>
+        <span>Choose CSV</span>
+      </label>
+      <button type="submit" class="go">Import</button>
+      <p id="import-msg" class="msg" role="status" aria-live="polite"></p>
+    </form>
+  </section>
+</main>
+
+<nav class="tabbar" role="tablist" aria-label="Sections">
+  <button id="t-brief" role="tab" aria-selected="true" aria-controls="tab-brief" data-tab="brief">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"/></svg><span>Brief</span>
+  </button>
+  <button id="t-ask" role="tab" aria-selected="false" aria-controls="tab-ask" data-tab="ask">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M15.5 15.5 20 20"/></svg><span>Ask</span>
+  </button>
+  <button id="t-network" role="tab" aria-selected="false" aria-controls="tab-network" data-tab="network">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.2 11 15.8 7M8.2 13l7.6 4"/></svg><span>Network</span>
+  </button>
+</nav>
+
+<dialog id="settings" aria-labelledby="settings-title">
+  <form method="dialog" id="settings-form">
+    <h2 id="settings-title">What counts as unusual</h2>
+    <label class="slider">
+      <span>Daily price move <output id="price-out"></output></span>
+      <input id="price" type="range" min="1" max="15" step="0.5">
+    </label>
+    <label class="slider">
+      <span>Volume vs 20-day average <output id="volume-out"></output></span>
+      <input id="volume" type="range" min="1.2" max="5" step="0.1">
+    </label>
+    <p class="fine">Checked against end-of-day data for all 15 holdings.</p>
+    <div class="row">
+      <button value="cancel" type="submit" class="ghost">Cancel</button>
+      <button value="save" type="submit" class="go" id="settings-save">Apply</button>
+    </div>
+  </form>
+</dialog>
 </body>
 </html>

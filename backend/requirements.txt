@@ -1,15 +1,11 @@
-# Pinned to the versions the test suite passed with on a clean install (15 Nov 2026).
-# yfinance and the scrapers break on upstream changes; an unpinned rebuild on the host
-# could change behaviour without a code change. Bump deliberately, with CI green.
-fastapi==0.163.0
-uvicorn[standard]==0.54.0
-httpx==0.28.1
-beautifulsoup4==4.15.0
-lxml==6.1.3
-pypdf==7.1.0
-rapidfuzz==3.14.6
-python-multipart==0.0.33
-yfinance==1.8.0
-pandas==3.1.1
-pytest==9.2.0
-python-dotenv==1.2.4
+# Runtime dependencies (installed in the Docker image). Exact pins for direct deps.
+# Every third-party import in app/, scripts/ and eval/ must be listed here
+# (enforced by tests/test_api.py::test_every_third_party_import_is_pinned).
+fastapi==0.163.1          # API + static UI
+uvicorn==0.54.0           # ASGI server (Docker CMD; not imported)
+python-multipart==0.0.33  # FastAPI form/file parsing for /api/network/import (not imported)
+python-dotenv==1.2.4      # optional local .env loading (app/config.py)
+requests==2.34.2          # NSE, screener.in, PDFs, OpenAI-compatible LLM endpoint
+pypdf==7.1.0              # results PDFs, annexure bios, concall transcripts
+yfinance==1.8.0           # end-of-day prices (daily refresh only; imported lazily)
+# HTML parsing uses the stdlib html.parser on purpose: no beautifulsoup4 dependency.

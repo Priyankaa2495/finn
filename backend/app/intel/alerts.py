@@ -1,48 +1,72 @@
-"""Triggered EOD alerts. The investor decides what 'unusual' means.
+"""End-of-day threshold alerts. The investor defines "unusual"; code checks it.
 
-Volume is compared with the average of the previous N sessions (today excluded,
-otherwise a spike inflates its own baseline)."""
-from ..ingest import prices
+- price: |close / previous close - 1| >= price_move_pct
+- volume: today's volume >= volume_multiple x mean of the previous `lookback` sessions
+          (today excluded from its own baseline). Needs `min_history` prior sessions.
+"""
+from __future__ import annotations
 
-DEFAULTS = {"price_move_pct": 4.0, "volume_multiple": 2.0, "lookback": 20,
-            "care_about": ["results", "M&A", "management_change", "litigation", "fund_raise"],
-            "muted": [], "overrides": {}}
-
-
-def check(holdings, settings, since_date: str | None = None):
-    """Every session from since_date (the digest window's start) to the latest; always at
-    least the latest session. One alert per symbol: its most severe session in the window."""
-    out = []
-    for h in holdings:
-        sym = h["symbol"]
-        cfg = {**settings, **settings.get("overrides", {}).get(sym, {})}
-        s = prices.series(sym, n=cfg["lookback"] + 31)
-        best = None
-        for i in range(len(s) - 1, 1, -1):
-            if i < len(s) - 1 and (not since_date or s[i]["date"] < since_date):
-                break
-            a = _session(s, i, cfg)
-            if a and (best is None or a["severity"] > best["severity"]):
-                best = a
-        if best:
-            out.append({"symbol": sym, "name": h["name"], **best})
-    return sorted(out, key=lambda a: -a["severity"])
+import sqlite3
+from dataclasses import dataclass
+from typing import Iterable, Mapping, Sequence
 
 
-def _session(s, i, cfg):
-    today, prev = s[i], s[i - 1]
-    base = s[:i][-cfg["lookback"]:]
-    avg_vol = sum(r["volume"] for r in base) / len(base)
-    move = (today["close"] - prev["close"]) / prev["close"] * 100
-    vm = today["volume"] / avg_vol if avg_vol else 0
-    reasons = []
-    if abs(move) >= cfg["price_move_pct"]:
-        reasons.append(f"{move:+.1f}% on the day (your trigger ±{cfg['price_move_pct']}%)")
-    if vm >= cfg["volume_multiple"]:
-        reasons.append(f"volume {vm:.1f}× its {len(base)}-day average (trigger {cfg['volume_multiple']}×)")
-    if not reasons:
-        return None
-    return {"date": today["date"], "close": today["close"], "move_pct": round(move, 2),
-            "vol_multiple": round(vm, 2), "reasons": reasons,
-            "spark": [r["close"] for r in s[max(0, i - 29):i + 1]],
-            "severity": abs(move) / cfg["price_move_pct"] + vm / cfg["volume_multiple"]}
+@dataclass(frozen=True)
+class AlertConfig:
+    price_move_pct: float = 5.0
+    volume_multiple: float = 2.0
+    lookback: int = 20
+    min_history: int = 10
+
+    def __post_init__(self):
+        if self.price_move_pct <= 0 or self.volume_multiple <= 0:
+            raise ValueError("thresholds must be positive")
+        if not 1 <= self.min_history <= self.lookback:
+            raise ValueError("need 1 <= min_history <= lookback")
+
+
+@dataclass(frozen=True)
+class Alert:
+    symbol: str
+    date: str
+    kind: str          # price | volume
+    value: float       # % move, or volume multiple
+    threshold: float
+    message: str
+
+
+def detect(symbol: str, bars: Sequence[Mapping], cfg: AlertConfig = AlertConfig()) -> list[Alert]:
+    """bars: ascending by date, each with 'date', 'close', 'volume'. Checks the latest bar."""
+    if len(bars) < 2:
+        return []
+    today, prev = bars[-1], bars[-2]
+    alerts: list[Alert] = []
+
+    if prev["close"]:
+        pct = (today["close"] / prev["close"] - 1.0) * 100.0
+        if abs(pct) >= cfg.price_move_pct:
+            alerts.append(Alert(symbol, today["date"], "price", pct, cfg.price_move_pct,
+                                f"{symbol} {pct:+.1f}% on {today['date']} (your threshold ±{cfg.price_move_pct:g}%)"))
+
+    history = [b["volume"] for b in bars[-1 - cfg.lookback:-1] if b.get("volume") is not None]
+    vol = today.get("volume")
+    if vol is not None and len(history) >= cfg.min_history:
+        avg = sum(history) / len(history)
+        if avg > 0:
+            mult = vol / avg
+            if mult >= cfg.volume_multiple:
+                alerts.append(Alert(symbol, today["date"], "volume", mult, cfg.volume_multiple,
+                                    f"{symbol} volume {mult:.1f}× its {len(history)}-day average on "
+                                    f"{today['date']} (your threshold {cfg.volume_multiple:g}×)"))
+    return alerts
+
+
+def scan(conn: sqlite3.Connection, symbols: Iterable[str], cfg: AlertConfig = AlertConfig()) -> list[Alert]:
+    out: list[Alert] = []
+    for sym in symbols:
+        rows = conn.execute(
+            "SELECT date, close, volume FROM prices WHERE symbol = ? ORDER BY date DESC LIMIT ?",
+            (sym, cfg.lookback + 1),
+        ).fetchall()
+        out.extend(detect(sym, [dict(r) for r in reversed(rows)], cfg))
+    return out

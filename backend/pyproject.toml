@@ -1,0 +1,11 @@
+[project]
+name = "finn-backend"
+version = "1.0.0"
+requires-python = ">=3.12"
+# Dependencies live in requirements.txt (runtime, pinned) and requirements-dev.txt (tests),
+# so the Docker image and CI install exactly the same set. Single source of truth.
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
