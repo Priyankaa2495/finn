@@ -11,7 +11,7 @@ who can explain it. Rules-first: every workflow runs with no API key; a model is
 | Deployed | `https://<app>.onrender.com/?key=<FINN_ACCESS_TOKEN>`. Open once; the key becomes an httpOnly cookie and is stripped from the URL. |
 | Local | `cd backend && python -m venv .venv && .venv/Scripts/pip install -r requirements-dev.txt` (POSIX: `.venv/bin/pip`) |
 | | `uvicorn app.main:create_app --factory --port 8000` → http://localhost:8000 (open mode, no key) |
-| Tests | `python -m pytest` (226 tests, offline, zero-key) |
+| Tests | `python -m pytest` (229 tests + 1 skipped, offline, zero-key) |
 | Eval | `python scripts/eval_classify.py run -v` · `--baseline` scores the pre-tuning rules |
 | Refresh data | `python -m app.refresh --snapshot` (NSE + yfinance + eager PDF parsing → committed snapshot) |
 
@@ -100,4 +100,4 @@ Dockerfile · render.yaml · .github/workflows/tests.yml
 - Results PDFs: scanned or unusual layouts fall back to screener (labelled) or "Quarter not
   tabulated yet"; a retry with layout-preserving extraction handles column-block PDFs.
 - Read-aloud and voice input depend on the browser's Web Speech support; mic denial is handled.
-- Model IDs above are configuration defaults and were not verified against the provider's catalogue.
+- Model IDs above were exercised live on 16 Nov 2026 (fast tier selected guidance; Gemini 503s were absorbed by retries and the deep→fast fallback).
