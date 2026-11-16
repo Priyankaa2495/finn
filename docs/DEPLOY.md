@@ -57,7 +57,7 @@ Get a free key at https://aistudio.google.com. The defaults are `gemini-3.5-flas
 export GEMINI_API_KEY=your_key && export FINN_LLM_FAST=gemini-3.5-flash-lite && export FINN_LLM_DEEP=gemini-3.8-flash && uvicorn app.main:app --port 8000
 ```
 
-With a key you get cleaner one-liners, bios extracted from real management-change filings, model-judged guidance items, segment mix from investor decks, and a written bull/bear. Check `http://localhost:8000/api/meta` to see calls versus cache hits. `failures` should be 0; if it isn't, the model name is probably wrong and FINN has silently fallen back to its code-only path.
+With a key you get cleaner one-liners, bios extracted from real management-change filings, model-judged guidance items, segment mix from investor decks, and a written bull/bear. Check `http://localhost:8000/api/meta` to see calls versus cache hits. `failures` should be no higher than `deep_fallbacks`: the deep tier sometimes times out, and the fast tier then answers instead (a recovered failure). Failures beyond that, or `calls` staying at 0, mean the model name or key is wrong and FINN has fallen back to its code-only path.
 
 ## 4. Push to GitHub
 
